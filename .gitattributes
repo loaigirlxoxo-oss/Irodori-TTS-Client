@@ -1,0 +1,7 @@
+# バッチファイルは CRLF でなければ cmd.exe が正しく解釈しない。
+# また CP932(Shift_JIS) で保存してあるので、テキストとして正規化させない。
+*.bat -text
+*.cmd -text
+
+# PowerShell スクリプトも CRLF 前提
+*.ps1 text eol=crlf

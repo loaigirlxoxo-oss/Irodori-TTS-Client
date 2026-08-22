@@ -1,0 +1,1390 @@
+/* ══════════════════════════════════════════════════════════════
+   意匠。style.css の後に読み込んで上から塗り替える。
+   style.css には手を入れない。外すときは index.html の
+   <link rel="stylesheet" href="theme.css"> を 1 行消せば元へ戻る。
+
+   ダークのみ。地は純黒で、主役のカードだけ一段持ち上げる。
+   面ではなく線で見せる（二重の金枠）。角丸は使わない。
+   ══════════════════════════════════════════════════════════════ */
+
+@font-face {
+  /* ブラウザは OS 側のフォントを font-family 名だけでは引けない。
+     ファイルを読ませる必要があるので assets/ に同梱している。
+
+     夜永オールド明朝 Bold（作者 ichi / SIL Open Font License 1.1）。
+     OFL は再配布時にライセンス全文の添付を求めるので、
+     assets/OFL.txt を必ず一緒に配ること。 */
+  font-family:"Yonaga";
+  src:url("assets/YonagaOldMincho-Bold.woff2") format("woff2");
+  font-weight:400 700; font-display:swap;
+}
+
+:root {
+  color-scheme: dark;
+
+  /* ── style.css が使っている変数を差し替える ──
+     これを書かないと、変数を経由している箇所（入力欄の色や字体）が
+     元のガラス調のまま残る。とくに --font-family は Inter で、
+     日本語の字を持たないので select の中身が消える。 */
+  --font-body:"Yonaga","Yu Gothic UI","Meiryo",system-ui,sans-serif;
+  --font-mono:"Cascadia Mono",Consolas,monospace;
+  --font-family:var(--font-body);
+
+  --bg-primary:#000000;
+  --bg-secondary:#000000;
+  --bg-panel:#000000;
+  --accent-hover:#e0c288;
+  --accent-glow:rgba(201,168,106,.45);
+  --text-main:#e9ecf2;
+  --text-muted:#959daf;
+  --border:#21252e;
+  --success:#5aa87c;
+  --danger:#d06666;
+
+  /* 地。灰色ではなく青紫に寄せた暗色。奥→手前で明度と彩度を上げる */
+  --l0:#000000;
+  --l1:#000000;
+  --l2:#000000;
+  --l3:#050608;
+  --sunk:#000000;
+
+  --text:#e9ecf2; --muted:#959daf; --faint:#5c6478;
+  --line:#21252e; --line-2:#333945;
+
+  /* 「彩」の帯。分類の識別に使う */
+  --c1:#e8896b; --c2:#e8b84e; --c3:#c8cf6a; --c4:#7fc8a9; --c5:#6bb5c8;
+
+  --accent:#c9a86a; --accent-hi:#e0c288;
+  --accent-dim:rgba(201,168,106,.10); --accent-ln:rgba(201,168,106,.45);
+  --on-accent:#0a0b0d;
+  --ok:#5aa87c; --ng:#d06666;
+
+  --e1:0 1px 2px rgba(0,0,0,.6);
+  --e3:0 12px 34px rgba(0,0,0,.55), 0 2px 8px rgba(0,0,0,.45);
+  /* 額装に使う金の階調。塗らずに線として使う */
+  --gold:#c9a86a; --gold-dim:rgba(201,168,106,.34); --gold-faint:rgba(201,168,106,.16);
+  /* 角は落とさない。額装なので直角で受ける */
+  --u:8px; --r:0; --r-in:0;
+}
+
+:root {
+  /* 四隅の扇。SVG を data URI で持つ。色は金の薄い階調 */
+  --fan-tl:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13"><g fill="none" stroke="%23c9a86a" stroke-width="1" stroke-opacity="0.34"><path d="M0 12 A12 12 0 0 1 12 0"/><path d="M0 8 A8 8 0 0 1 8 0"/><path d="M0 0 L12 0 M0 0 L0 12 M0 0 L9 9"/></g></svg>');
+  --fan-tr:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13"><g fill="none" stroke="%23c9a86a" stroke-width="1" stroke-opacity="0.34" transform="translate(13,0) scale(-1,1)"><path d="M0 12 A12 12 0 0 1 12 0"/><path d="M0 8 A8 8 0 0 1 8 0"/><path d="M0 0 L12 0 M0 0 L0 12 M0 0 L9 9"/></g></svg>');
+  --fan-bl:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13"><g fill="none" stroke="%23c9a86a" stroke-width="1" stroke-opacity="0.34" transform="translate(0,13) scale(1,-1)"><path d="M0 12 A12 12 0 0 1 12 0"/><path d="M0 8 A8 8 0 0 1 8 0"/><path d="M0 0 L12 0 M0 0 L0 12 M0 0 L9 9"/></g></svg>');
+  --fan-br:url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="13" height="13"><g fill="none" stroke="%23c9a86a" stroke-width="1" stroke-opacity="0.34" transform="translate(13,13) scale(-1,-1)"><path d="M0 12 A12 12 0 0 1 12 0"/><path d="M0 8 A8 8 0 0 1 8 0"/><path d="M0 0 L12 0 M0 0 L0 12 M0 0 L9 9"/></g></svg>');
+}
+
+*,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
+
+body {
+  font-family:"Yonaga","Segoe UI","Yu Gothic UI",serif;
+  font-size:13.5px; line-height:1.6; color:var(--text);
+  height:100vh; overflow:hidden; -webkit-font-smoothing:antialiased;
+  /* 平坦な単色をやめる。左上と右下にごく薄い光を置いて奥行きを作る */
+  background:
+    radial-gradient(1100px 700px at 8% -10%, rgba(201,168,106,.02), transparent 60%),
+    radial-gradient(900px 600px at 100% 108%, rgba(107,181,200,.016), transparent 62%),
+    var(--l0);
+  background-attachment:fixed;
+}
+button,input,select,textarea { font:inherit; color:inherit; }
+button { cursor:pointer; }
+.i { width:16px;height:16px;flex-shrink:0;stroke:currentColor;fill:none;
+     stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round; }
+.i-sm { width:13px;height:13px; }
+.cap {
+  /* 本文 13.5px に対して 10.5px は小さすぎ、見出しに見えなかった。
+     本文と同じ大きさに置いて、見出しらしさは字間と金色で出す。 */
+  font-size:14px; font-weight:400; letter-spacing:.26em; text-transform:uppercase;
+  color:var(--gold); opacity:.85;
+}
+.sp { flex:1; }
+
+/* 四芒星と横線。公式サイト下部の装飾を区切りとして使う */
+.rule {
+  grid-column:span 12; display:flex; align-items:center; gap:10px;
+  padding:2px 0 4px; opacity:.55;
+}
+.rule::before, .rule::after {
+  content:""; flex:1; height:1px;
+  background:linear-gradient(90deg,transparent,var(--gold-dim) 22%,var(--gold-dim) 78%,transparent);
+}
+.rule i {
+  width:11px; height:11px; flex-shrink:0;
+  background:var(--gold);
+  /* 四芒星。中心から鋭く伸びる形 */
+  clip-path:polygon(50% 0,58% 42%,100% 50%,58% 58%,50% 100%,42% 58%,0 50%,42% 42%);
+  filter:drop-shadow(0 0 5px var(--gold-dim));
+}
+
+/* ══ ヘッダ ══ */
+.hdr {
+  display:flex; align-items:center; gap:14px; height:52px; padding:0 14px; flex-shrink:0;
+  background:linear-gradient(180deg, rgba(255,255,255,.016), transparent), var(--l1);
+  border-bottom:1px solid var(--line); position:relative;
+}
+.hdr::after {
+  content:""; position:absolute; left:0; right:0; bottom:-1px; height:1px;
+  background:linear-gradient(90deg,transparent,var(--gold-dim) 12%,var(--gold-dim) 88%,transparent);
+  opacity:.9;
+}
+.brand { display:flex; align-items:center; gap:9px; }
+.brand .mk { width:26px;height:26px;display:block; }
+/* ロゴは叛逆明朝を画像化したもの。環境にフォントが無くても同じ字面になる */
+/* 2 倍で焼いてあるので半分の高さで置く（125%/150% 表示でぼやけない） */
+.brand .wm { height:27px; display:block; opacity:.92; }
+
+/* ══ 画面の骨格 ════════════════════════════════════════
+   もとは左に固定の柱があり、その右が本体という作りだった。
+   ヘッダを上に積む形へ変える。 */
+.app-container { flex-direction:column; height:100vh; overflow:hidden; }
+
+/* もとは縦の flex だったが、タブの中身は自前で組むので素の block に戻す。
+   flex のままだと .tab-pane が flex 項目になり、中の grid 指定が
+   期待どおりに効かない。 */
+.main-content {
+  display:block;
+  flex:1; padding:calc(var(--u)*1.5); overflow-y:auto; min-height:0;
+}
+
+/* 合成タブだけ右に 250px の柱を立てる。
+   グリッド／フレックスの子は既定が min-width:auto なので、
+   0 を明示しないと幅の広い行が柱を画面外へ押し出す。 */
+.tab-pane.active[data-tab="synthesize"] {
+  display:grid;
+  grid-template-columns:minmax(0,1fr) 250px;
+  gap:calc(var(--u)*1.5);
+  align-items:start;
+}
+/* 柱は DOM 上は先頭にあるが、置くのは右。
+   grid-row を 1 から広く取って、左列の行数に関わらず縦に貫かせる。 */
+.tab-pane[data-tab="synthesize"] > .aside { grid-column:2; grid-row:1 / span 99; }
+.tab-pane[data-tab="synthesize"] > .work  { grid-column:1; min-width:0; }
+
+/* 本体側の並びはモックと同じ 12 桁。span-* が桁を決める。 */
+.work {
+  display:grid; grid-template-columns:repeat(12,1fr); gap:var(--u);
+  align-content:start; align-items:start; min-width:0;
+}
+.params-grid, .param-group, .controls-panel, .input-region, .output-region { min-width:0; }
+.header-split { flex-wrap:wrap; }
+.header-split > * { min-width:0; }
+.api-url-box { min-width:0; display:flex; gap:6px; }
+.api-url-box input { width:auto; flex:1; min-width:0; }
+
+/* 左の柱ではなくなったので、幅と境界を引き直す */
+.aside {
+  width:auto; height:auto;
+  padding:0 0 0 calc(var(--u)*1.5);
+  border-right:none; border-left:1px solid var(--gold-dim);
+  background:transparent; overflow:visible;
+}
+.aside .voice-list { max-height:none; flex:none; overflow-y:visible; }
+
+/* ══ 角飾り ════════════════════════════════════════════
+   機械仕掛けの飾り罫（歯車と唐草）を下角に置く。
+   素材は左上向きなので、上下（と左右）を反転させたものを使う。
+
+   メインの左下・右下、右パネルの左下・右下で計 4 か所。
+   上はヘッダとナビが占めているので入れない。
+
+   飾りは中身ではなく画面に属する。スクロールしても動かないよう
+   画面そのものに貼り付ける（position:fixed）。
+   中身を隠さないよう、当たり判定は切っておく。
+
+   置くのはメインの左下・右下と、右パネルの左下・右下で計 4 か所。
+   右パネルの幅は 250px なので、その境目を軸に左右へ振り分ける。 */
+.corner {
+  position:fixed; bottom:0; z-index:5; pointer-events:none;
+  width:32px; height:32px;
+  background-repeat:no-repeat; background-size:contain;
+  opacity:.55;
+}
+.corner-bl { background-image:url("assets/corner-bl.png"); background-position:left bottom; }
+.corner-br { background-image:url("assets/corner-br.png"); background-position:right bottom; }
+
+/* 柱の左端 ＝ 画面右端 − (柱 250px + 本体の余白 12px + 柱の内側の余白 12px)。
+   実測して合わせた値。ここを間違えると飾りと境界線が数 px ずれる。 */
+.corner-main-l { left:0; }
+.corner-main-r { right:271px; }
+.corner-side-l { right:calc(271px - 32px); }
+.corner-side-r { right:0; }
+
+/* 右パネルを持たないタブでは、メインが画面の端まで届く。
+   その場合、右パネル用の 2 つは出さない（body に .no-aside が付く）。 */
+body.no-aside .corner-main-r { right:0; }
+body.no-aside .corner-side-l,
+body.no-aside .corner-side-r { display:none; }
+
+
+/* 設定に添える補足。読まなくても操作できる位置と濃さに置く */
+.note { font-size:10.5px; line-height:1.7; color:var(--faint); }
+/* チェックと文字を 1 行に並べる。文字側も押せるように label で包む */
+.chk-line { display:flex; align-items:center; gap:7px; font-size:11.5px;
+            color:var(--muted); cursor:pointer; }
+.chk-line input { accent-color:var(--accent); margin:0; }
+
+/* 未着手のタブに出す仮の中身 */
+.stub { padding:40px 14px; text-align:center; }
+.stub-t { font-family:"Yonaga",serif; font-size:15px; color:var(--muted); letter-spacing:.10em; }
+.stub-d { margin-top:7px; font-size:11.5px; color:var(--faint); }
+
+.nav { display:flex; gap:2px; margin-left:6px; }
+.nav button {
+  position:relative; display:flex; align-items:center; gap:6px; height:28px; padding:0 10px;
+  font-size:12.5px; font-weight:500; color:var(--muted);
+  background:none; border:none; border-radius:var(--r-in);
+  transition:color .14s, background .14s;
+}
+.nav button:hover { color:var(--text); background:rgba(255,255,255,.05); }
+.nav button[aria-current="page"] { color:var(--accent); font-weight:600; }
+.nav button[aria-current="page"]::after {
+  content:""; position:absolute; left:9px; right:9px; bottom:-13px; height:2px;
+  background:var(--accent); box-shadow:0 0 10px -1px var(--accent);
+}
+.hdr-end { margin-left:auto; display:flex; align-items:center; gap:8px; }
+.chip {
+  display:inline-flex;align-items:center;gap:6px;height:23px;padding:0 10px;border-radius:0;
+  font-size:11px;font-weight:600;color:var(--ok);background:transparent;
+  border:1px solid color-mix(in srgb,var(--ok) 32%,transparent);
+}
+.chip .dot { width:5px;height:5px;border-radius:50%;background:currentColor;box-shadow:0 0 7px 1px currentColor; }
+
+/* 日英切り替え。接続表示と高さを揃えて並べる。
+   いま何語かを字で示し、行き先も同じ幅で並べる。押すと入れ替わる。 */
+.lang {
+  display:inline-flex;align-items:center;gap:5px;height:23px;padding:0 9px;
+  border-radius:0;font-size:11px;
+  color:var(--faint);background:transparent;border:1px solid var(--line-2);
+  transition:color .14s,border-color .14s,background .14s;
+}
+.lang b { font-weight:700;color:var(--accent); }   /* 現在の言語 */
+.lang .sl { opacity:.5; }
+.lang:hover { color:var(--muted);border-color:var(--accent-ln);background:var(--accent-dim); }
+
+.span-12{grid-column:span 12} .span-10{grid-column:span 10} .span-9{grid-column:span 9} .span-8{grid-column:span 8}
+.span-7{grid-column:span 7}  .span-5{grid-column:span 5} .span-4{grid-column:span 4}
+.span-3{grid-column:span 3} .span-2{grid-column:span 2}
+
+/* ── 額装 ──────────────────────────────────────
+   公式サイトの「二重の金枠＋四隅の扇」を持ち込む。
+   外枠＝細い金、内枠＝一段内側の薄い線。角に扇形を置く。 */
+/* 額装。外は太く濃く、内は細く薄く。太さの差で二重だと分からせる */
+.card {
+  position:relative; background:var(--l2);
+  border:2px solid var(--gold-dim); border-radius:var(--r);
+  box-shadow:var(--e1); min-width:0;
+}
+/* 内側の罫。外枠から 3px 入れて二重にする */
+.card::before {
+  content:""; position:absolute; inset:3px; pointer-events:none;
+  border:1px solid var(--gold-faint); border-radius:0;
+}
+/* 四隅の扇は使わない。小さいカードでは面積に対して主張が強く、
+   数が並ぶと画面が飾りで埋まる。額装は二重の金枠だけで足りる。
+   （--fan-* の定義は残してあるので、戻すならここを書き戻す） */
+
+/* 主役は面を明るくし、上辺に細い光を入れて浮かせる */
+.card.lift {
+  background:linear-gradient(180deg, rgba(255,255,255,.022), transparent 90px), var(--l3);
+  box-shadow:var(--e3); border-color:var(--gold-dim);
+}
+.card-hd {
+  display:flex;align-items:center;gap:10px;height:36px;padding:0 14px;
+  border-bottom:1px solid var(--gold-faint);
+}
+/* 見出しの前に短い金の縦罫を置く */
+.card-hd > .cap::before {
+  content:""; display:inline-block; width:1px; height:9px; margin-right:9px;
+  background:var(--gold); vertical-align:-1px; opacity:.8;
+}
+
+/* ══ 入力 ══
+   セリフ欄はここだけで定義する。以前は「1 枚の大きな textarea」用の
+   規則（min-height:104px / padding 14px / line-height 1.9）を別所で
+   打ち消していたが、漏れるたび下に空白が残った。継承させず 1 か所に置く。 */
+.editor textarea {
+  display:block;width:100%;border:none;outline:none;background:transparent;
+  padding:0; margin:0; font-size:14px; line-height:1.5;
+  min-height:0; height:21px; overflow:hidden; resize:none;
+}
+.editor textarea::placeholder { color:var(--faint); }
+/* ══ セリフの積み上げ ══════════════════════════════
+   1 行 1 セリフ。番号で順番を、右端の × で削除を示す。
+   欄が増えるほど縦に伸びるので、1 欄の最低高さは低めに取る。 */
+.lines { display:flex;flex-direction:column; }
+/* 余白は行が持つ。textarea 側に持たせると高さの自動調整とぶつかる */
+.line { display:flex;align-items:center;gap:8px;padding:10px 10px 10px 0;
+        border-bottom:1px solid var(--line); }
+/* 行ごとの実測値。積んだとき縦に揃うよう幅を固定する */
+.line .meta { flex-shrink:0;width:96px;text-align:right;font-size:11px; }
+.line .meta b { font-size:11.5px; }
+.line:last-child { border-bottom:none; }
+.line .ln {
+  flex-shrink:0;width:30px;text-align:center;
+  font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums;
+}
+.line .editor-field { flex:1;min-width:0; }
+/* 削除は普段沈めておき、その行を触っているときだけ出す */
+.ln-del {
+  flex-shrink:0;width:28px;border:none;background:none;color:var(--faint);
+  opacity:0;transition:opacity .12s,color .12s;
+}
+.line:hover .ln-del, .ln-del:focus-visible { opacity:1; }
+.ln-del:hover { color:var(--ng); }
+
+.lines-foot {
+  display:flex;align-items:center;gap:9px;
+  padding:7px 11px;border-top:1px solid var(--line);
+}
+.meta-sum { font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums; }
+.meta-sum b { color:var(--text);font-weight:700;font-size:12.5px; }
+
+/* 文字数は入力に対する情報なので、行を作らず入力欄の中に置く。
+   右下は textarea のリサイズつまみが出る場所なので、その内側に寄せる。 */
+.editor-field { position:relative; }
+.editor-field textarea { padding-bottom:28px; }
+.editor-field .meta {
+  position:absolute; right:24px; bottom:8px; pointer-events:none;
+}
+
+/* 生成前に見る唯一の実測値。--faint だと地に沈んで読めないので、
+   数字は太らせて起こし、単位だけ落として主従を付ける */
+.meta { font-size:11.5px;color:var(--muted);font-variant-numeric:tabular-nums; }
+.meta b { color:var(--text);font-weight:700;font-size:12.5px; }
+
+.btn {
+  display:inline-flex;align-items:center;gap:6px;height:31px;padding:0 13px;
+  border-radius:0;font-size:12.5px;font-weight:600;border:1px solid transparent;
+  transition:background .14s,border-color .14s,box-shadow .14s,color .14s;
+}
+.btn-primary { background:var(--accent);color:var(--on-accent);box-shadow:var(--e1); }
+.btn-primary:hover { background:var(--accent-hi);box-shadow:var(--e1),0 0 20px -6px var(--accent); }
+.btn-ghost { background:transparent;color:var(--muted);border-color:var(--line-2); }
+.btn-ghost:hover { color:var(--text);border-color:var(--accent-ln);background:var(--accent-dim); }
+.btn-sm { height:25px;padding:0 9px;font-size:11px;font-weight:500; }
+
+/* 生成。カードの底に敷いて主役だと分からせる。
+   額装の内罫（inset 3px）に噛まないよう左右下に 4px 逃がす。
+
+   色は小さいボタンと同じ明度にしない。面積が 10 倍になると同じ金でも
+   光の板になって地から浮く。暗く沈めたうえで枠と字を金に残し、
+   「金のボタン」であることは輪郭と文字で伝える。
+
+   ただし透過で薄めると地の黒が透けて濁る。黒と混ぜた不透明な金を
+   直に置いて、濁らせずに明度だけ落とす。
+   .btn-primary と同詳細度なので、必ずその後ろに置くこと。 */
+.btn-gen {
+  display:flex;width:calc(100% - 8px);margin:0 4px 4px;height:38px;
+  justify-content:center;gap:8px;font-size:13.5px;letter-spacing:.12em;
+  background:linear-gradient(180deg, #6b5836, #52432a);
+  border-color:var(--accent);
+  color:#f3e3c0;
+  box-shadow:none;
+}
+.btn-gen:hover {
+  background:linear-gradient(180deg, #8a7145, #6b5836);
+  border-color:var(--accent-hi);
+  color:#fff6e2;
+  box-shadow:0 0 26px -10px var(--accent);
+}
+
+/* カード見出しの右に置く道具。ラベルは持たせず正方形に揃える。
+   文字を並べると見出しと競って、どれが表題か分からなくなる。
+   名前は hover で出す（下の .tip）。 */
+.btn-tool { width:22px;height:22px;padding:0;justify-content:center; }
+.btn-tool .i { width:12px;height:12px; }
+/* 250px の柱では見出しと道具が競る。見出し側の字間を詰めて場所を空ける。
+   字を 14px に上げたぶん、ここは字間をさらに詰めて幅を戻す */
+.aside .card-hd { gap:6px;padding:0 10px; }
+.aside .card-hd .cap { letter-spacing:.10em; }
+
+/* 自前のツールチップ。title 属性は出るまで約 1 秒かかり、
+   体裁も OS 任せで黒地に合わない。 */
+.tip { position:relative; }
+.tip::after {
+  content:attr(data-tip);
+  /* 右端のボタンでも枠から出ないよう、右辺をボタンの右に合わせて内側へ伸ばす */
+  position:absolute; top:calc(100% + 6px); right:-2px; z-index:20;
+  padding:3px 8px; white-space:nowrap;
+  font-size:10.5px; font-weight:500; letter-spacing:.04em;
+  color:var(--text); background:var(--l3);
+  border:1px solid var(--gold-dim); border-radius:0;
+  box-shadow:var(--e1);
+  opacity:0; pointer-events:none; transition:opacity .12s .25s;
+}
+.tip:hover::after, .tip:focus-visible::after { opacity:1; }
+
+/* ══ タグ ══ */
+.tags { border-top:1px solid var(--line); }
+.tags > summary {
+  list-style:none;display:flex;align-items:center;gap:7px;height:31px;padding:0 12px;
+  font-size:11px;color:var(--muted);user-select:none;
+}
+.tags > summary::-webkit-details-marker { display:none; }
+.tags > summary:hover { color:var(--text); }
+.chev { transition:transform .16s; }
+details[open] > summary .chev { transform:rotate(90deg); }
+.n { color:var(--faint);font-variant-numeric:tabular-nums; }
+.tag-wrap { padding:2px 12px 12px; display:flex; flex-direction:column; gap:9px; }
+.tag-group { display:flex;flex-direction:column;gap:4px; }
+.tag-cat {
+  display:flex;align-items:center;gap:6px;
+  font-size:9.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--faint);
+}
+.tag-cat::before { content:"";width:5px;height:5px;border-radius:50%;background:var(--gc);
+                   box-shadow:0 0 6px -1px var(--gc); }
+.tag-row { display:flex;flex-wrap:wrap;gap:3px; }
+/* 絵文字は使わない。環境で字形と色が変わるうえ、金と黒に絞った地の中で
+   絵文字の色だけが浮いて、分類色そのものを潰してしまう。
+   識別は「左端の短い縦罫の色」に持たせる。文字は文字のまま読ませる。 */
+.tag {
+  display:inline-flex;align-items:center;gap:7px;height:25px;padding:0 9px 0 8px;
+  border-radius:0;font-size:11.5px;color:var(--muted);
+  background:transparent;border:1px solid var(--line);white-space:nowrap;
+  transition:color .12s,border-color .12s,background .12s;
+}
+/* 分類の帯。点ではなく縦罫にして、行が詰まっても切れ目が読めるようにする */
+.tag::before {
+  content:""; width:2px; height:11px; flex-shrink:0;
+  background:var(--gc); opacity:.75;
+  transition:opacity .12s;
+}
+.tag:hover {
+  color:var(--text); border-color:color-mix(in srgb,var(--gc) 55%,transparent);
+  background:color-mix(in srgb,var(--gc) 12%,transparent);
+}
+.tag:hover::before { opacity:1; }
+.g1{--gc:var(--c1)} .g2{--gc:var(--c2)} .g3{--gc:var(--c3)} .g4{--gc:var(--c4)} .g5{--gc:var(--c5)}
+
+/* ══ サンプリング（メインへ移動）══ */
+/* 1 行に並べる。詰まって見えていたのは項目そのものの幅ではなく列の間隔。
+   gap を広げて隣との間を空け、スライダーは列いっぱいのままにする。 */
+.samp {
+  display:grid; grid-template-columns:repeat(auto-fit,minmax(158px,1fr));
+  gap:11px 30px; padding:12px 14px;
+}
+.f { display:flex;flex-direction:column;gap:3px;min-width:0; }
+/* 本体の項目は .param-group。モックの .f と同じ扱いにする */
+.f > label, .param-group > label {
+  display:flex;align-items:baseline;gap:6px;font-size:11.5px;color:var(--muted);
+  white-space:nowrap;
+}
+/* 「説明文忠実度 Caption CFG 4.0」のように和名＋英名＋値が並ぶと
+   桁の幅（158px）を超えて折り返し、値とスライダーが 1 段ずれる。
+   縮めていいのは英名。和名と値は読めないと困るので縮めない。 */
+.f > label > .en, .param-group > label > .en {
+  min-width:0; overflow:hidden; text-overflow:ellipsis;
+}
+.f > label .en, .param-group > label .en {
+  color:var(--faint);font-size:10px;font-family:"Cascadia Mono",Consolas,monospace;
+}
+/* 値は行の右端へ。数字は等幅にして桁が変わっても列が動かないようにする */
+.f .v, .param-group .v {
+  margin-left:auto;color:var(--accent);font-weight:700;
+  font-variant-numeric:tabular-nums;font-size:12px;
+}
+
+/* 状況で操作できなくなる項目。なぜ触れないかを必ず添える。
+   灰色にするだけだと壊れているように見える。 */
+.is-locked { opacity:.55; }
+.is-locked input[type="range"] { cursor:default; }
+.is-locked .v { color:var(--muted); }
+.lock-why { font-size:10px;color:var(--faint);letter-spacing:.02em; }
+
+select,input[type="text"],input[type="number"] {
+  width:100%;height:29px;padding:0 8px;background:var(--sunk);border:1px solid var(--line);
+  border-radius:0;font-size:12.5px;outline:none;transition:border-color .14s,box-shadow .14s;
+}
+select:focus,input:focus { border-color:transparent;box-shadow:0 0 0 1px var(--accent-ln),0 0 16px -6px var(--accent); }
+select:hover,input:hover { border-color:var(--line-2); }
+input[type="range"] {
+  -webkit-appearance:none;appearance:none;width:100%;height:3px;border-radius:2px;
+  background:var(--line-2);outline:none;margin:7px 0 3px;
+}
+input[type="range"]::-webkit-slider-thumb {
+  -webkit-appearance:none;width:12px;height:12px;border-radius:50%;background:var(--accent);
+  border:none;cursor:pointer;box-shadow:0 0 0 3px var(--l2),0 0 10px -2px var(--accent);
+}
+.two { display:grid;grid-template-columns:1fr 1fr;gap:7px; }
+
+/* ══ 波形 ══ */
+.take { display:flex;align-items:center;gap:11px;padding:9px 12px;border-bottom:1px solid var(--line); }
+.take:last-child { border-bottom:none; }
+.take:hover { background:rgba(255,255,255,.022); }
+.take .no { font-size:11px;color:var(--faint);width:13px;font-variant-numeric:tabular-nums; }
+/* 生成結果は下へ積むので、どこからが今回かを時刻で区切る。
+   行番号は毎回 1 から振り直されるため、これが無いと境目が読めない。 */
+.run-sep {
+  display:flex;align-items:center;gap:9px;
+  padding:6px 12px;font-size:10px;color:var(--faint);
+  font-variant-numeric:tabular-nums;border-bottom:1px solid var(--line);
+}
+.run-sep::after { content:"";flex:1;height:1px;background:var(--line); }
+.play {
+  display:grid;place-items:center;width:28px;height:28px;flex-shrink:0;border-radius:50%;
+  background:var(--accent-dim);border:1px solid var(--accent-ln);color:var(--accent);
+  transition:background .14s,box-shadow .14s,color .14s;
+}
+.play:hover { background:var(--accent);color:var(--on-accent);box-shadow:0 0 16px -4px var(--accent); }
+/* 波形は drawClipWave が canvas に描く。線の色は color から取るので
+   ここで決める（指定が無いと地の文字色で描かれて沈む）。 */
+.wave { flex:1;height:34px;min-width:0;display:block;cursor:pointer;color:var(--accent); }
+/* どの行の結果かを字で示す。波形は見分けが付かない */
+.take .src {
+  width:180px;flex-shrink:0;font-size:11.5px;color:var(--muted);
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+}
+.take .len { font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;flex-shrink:0; }
+/* 失敗した行は色で示す。消さずに残して、どの行が駄目だったか分かるように */
+.take .len.ng { color:var(--ng); }
+.take .acts { display:flex;gap:1px;flex-shrink:0; }
+.take .acts button {
+  display:grid;place-items:center;width:25px;height:25px;border-radius:var(--r-in);
+  background:none;border:none;color:var(--faint);transition:color .12s,background .12s;
+}
+.take .acts button:hover { background:rgba(255,255,255,.07);color:var(--text); }
+.take.busy .wave { animation:pulse 1.5s ease-in-out infinite; }
+@keyframes pulse { 0%,100%{opacity:.35} 50%{opacity:.8} }
+.take.busy .play { animation:ring 1.5s ease-out infinite; }
+@keyframes ring { 0%{box-shadow:0 0 0 0 var(--accent-ln)} 100%{box-shadow:0 0 0 10px transparent} }
+
+/* ══ 参照ボイス ══ */
+/* 一覧で並べると数が増えたときカードが縦に伸びる。選ぶだけなので畳む。
+   選んだものを聴けるよう、試聴と波形だけ横に残す。 */
+/* 選んだ声を聴いて確かめる行。プルダウンの下に敷く */
+.vpick { display:flex;align-items:center;gap:8px;margin-top:9px; }
+.play-sm { width:25px;height:25px; }
+.vpick .mini-wave { width:44px;height:16px;flex-shrink:0;opacity:.5; }
+/* 置き場所は畳んで小さく添えるだけ。柱は幅がないので一行に収める */
+.hint-inline code {
+  font-family:"Cascadia Mono",Consolas,monospace;font-size:10px;padding:1px 5px;
+  border-radius:0;background:var(--sunk);border:1px solid var(--line);color:var(--faint);
+}
+
+/* ══ 右パネル（設定の奥）══ */
+.grp { border-bottom:1px solid var(--gold-faint);padding:11px 12px; }
+.grp:last-child { border-bottom:none; }
+.grp > .cap { display:block;margin-bottom:9px; }
+.grp .f { margin-bottom:10px; }
+.grp .f:last-child { margin-bottom:0; }
+/* 折りたたみの見出し。中身の項目名と同じ灰だと親子が並んで見えるので、
+   金にして「開く見出し」であることを字の色で示す。〉も同じ色で連れていく */
+details.more > summary {
+  list-style:none;display:flex;align-items:center;gap:7px;height:22px;
+  font-size:11px;color:var(--gold);opacity:.85;user-select:none;
+}
+details.more > summary::-webkit-details-marker { display:none; }
+details.more > summary:hover { color:var(--accent-hi);opacity:1; }
+.more-body { padding-top:9px;display:flex;flex-direction:column;gap:10px; }
+
+/* 額装する群。柱の区切り線は引かず、カードの枠に語らせる */
+.grp-card { border-bottom:none; }
+.card-body { padding:11px 12px; }
+/* カードの中では「群の見出し」を二重に持たない。card-hd が見出しを兼ねる */
+.grp-card .f:last-child { margin-bottom:0; }
+
+.stat { margin-bottom:9px; }
+.stat:last-child { margin-bottom:0; }
+.stat-t { display:flex;justify-content:space-between;align-items:baseline;font-size:11px;color:var(--muted);margin-bottom:4px; }
+.stat-t b { font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;font-size:12px; }
+.stat-t b i { font-style:normal;font-weight:500;color:var(--faint);font-size:10.5px; }
+.bar { height:3px;border-radius:2px;background:var(--line);overflow:hidden; }
+.bar > i { display:block;height:100%;background:var(--ok);box-shadow:0 0 8px -1px var(--ok); }
+/* 柱が狭いと「181 個 ・ 17.2 GB」が入らない。横に並べきれないときだけ
+   値を次の行へ落とす。ラベルと値の対応は保ったまま高さで吸収する。 */
+.kv { display:flex;justify-content:space-between;align-items:baseline;gap:8px;
+      flex-wrap:wrap;font-size:11.5px;color:var(--muted);padding:3px 0; }
+.kv > b { margin-left:auto; }
+.kv b { font-weight:700;color:var(--text);font-variant-numeric:tabular-nums;font-size:12px; }
+.kv b i { font-style:normal;font-weight:500;color:var(--faint);font-size:10.5px; }
+
+/* ══ モックと本体のクラス対応 ══════════════════════════
+   モックは新しく書いたので素直な名前を使っている。本体は既存の
+   名前を保つ必要がある（renderer.js が引いている）。
+   同じ役目のものをここで結び直す。 */
+
+/* 項目の枠: モック .f = 本体 .param-group（上で label と .v は対応済み） */
+.param-group { display:flex; flex-direction:column; gap:3px; min-width:0; }
+.two { display:grid; grid-template-columns:1fr 1fr; gap:7px; }
+
+/* 入力欄の地。旧いガラス調の背景と角丸を落とす */
+.glass-input, .glass-textarea, .subtle,
+input[type="text"], input[type="number"], input[type="search"], textarea, select {
+  background:var(--sunk); backdrop-filter:none;
+  border-radius:0; border:1px solid var(--line); color:var(--text);
+}
+.glass-input:focus, .glass-textarea:focus,
+input:focus, textarea:focus, select:focus {
+  outline:none; border-color:transparent;
+  box-shadow:0 0 0 1px var(--accent-ln), 0 0 16px -6px var(--accent);
+}
+/* select。矢印のぶんだけ右に余白を取る。
+   描画はブラウザに任せる（appearance は触らない）。
+   暗い前提は :root の color-scheme と main.js の nativeTheme で伝える。
+   字体は OS のものを使う（同梱の woff2 は select に効かないことがある）。 */
+select, select.glass-input, select.scale-sm, .card-body select, .more-body select {
+  /* style.css の .glass-input は padding 12px/16px・font 14px を当てる。
+     高さ 29px の枠にそのまま乗ると、字が枠の外へ押し出されて消える。
+     入力欄と同じ寸法に揃える。 */
+  height:29px; padding:0 26px 0 8px; font-size:12.5px; line-height:normal;
+  text-overflow:ellipsis;
+}
+/* 入力欄も同じ理由で揃える */
+input[type="text"], input[type="number"], input[type="search"], .glass-input {
+  height:29px; padding:0 8px; font-size:12.5px;
+}
+textarea, .glass-textarea { height:auto; padding:8px 10px; font-size:14px; line-height:1.8; }
+/* option の色は指定しない。開いた一覧はブラウザが自前で描くので、
+   color-scheme:dark（と main.js の nativeTheme）に任せるほうが確実。
+   ここで色を決めると、閉じているときの表示にも同じ色が使われ、
+   地と同じ色になって字が消えることがある。 */
+
+/* 演出タグ。もとは高さ 180px で切って中をスクロールさせていたが、
+   分類ごとに畳めるようにしたので制限は要らない。枠も外して
+   入力欄と地続きにする（モックでは入力カードの一部）。 */
+.emoji-toolbar {
+  display:block; max-height:none; overflow:visible;
+  background:transparent; border:none; padding:0;
+  border-top:1px solid var(--line);
+}
+
+/* 並びは HTML の順（サンプリング → 入力 → 生成結果）に従う。
+   以前は行を明示して入れ替えていたが、いまは HTML 側が
+   モックと同じ順になっているので、指定は要らない。
+
+   生成結果と状態は 10 : 2 で横に並ぶ（span-10 / span-2）。
+   .out-row で包んでいたときの指定は残っていても効かない。 */
+.out-row { display:contents; }
+
+/* 右パネルの中の群。モックの .grp と同じ間隔にする */
+.aside .grp { border-bottom:1px solid var(--gold-faint); padding:11px 0; }
+.aside .grp:last-child { border-bottom:none; }
+.aside .grp-card { border-bottom:none; }
+.aside .card-body { padding:11px 12px; display:flex; flex-direction:column; gap:10px; }
+
+/* 声の 1ショット / LoRA。縦に並べる */
+.conditioning-mode { display:flex; flex-direction:column; gap:6px; }
+
+/* ══ 合成タブの細部 ════════════════════════════════════
+   本体だけにあって、モックには対応する形が無かったもの。 */
+
+/* 参照ボイスはプルダウン。選ぶ欄と削除を横に並べる */
+.voice-list { display:block; }
+.vpick { display:flex; align-items:center; gap:8px; }
+.vpick select { flex:1; min-width:0; }
+
+/* 生成ボタンの行。ボイス名と並べると幅を取り合って潰れるので縦に積む */
+.action-bar { display:block; }
+.selected-voice-display { margin-bottom:9px; }
+.selected-voice-display span { font-size:11.5px; color:var(--muted); }
+.selected-voice-display strong { color:var(--text); font-weight:600; }
+
+/* 保存先。生成ボタンの下に薄く添える */
+.save-folder-bar { margin-top:8px; }
+.save-folder-bar .btn-secondary { gap:6px; }
+
+/* 生成結果と状態を横に並べる。モックでは 10 : 2 の比 */
+.out-row {
+  display:grid; grid-template-columns:minmax(0,1fr) 210px;
+  gap:var(--u); align-items:start;
+}
+.output-region { min-width:0; }
+.output-region .card-hd { margin:0; }
+/* テイクは 1 行 1 本で縦に積む。style.css の .result-panel は
+   display:flex（横並び・中央寄せ）で、旧 UI が audio 1 個だけだった
+   頃の指定。そのままだと 2 本目以降が横に並んで潰れる。 */
+.result-panel {
+  border:none; background:transparent; padding:12px 14px;
+  display:block; min-height:0;
+}
+/* 何も無いときの案内だけは真ん中に置く（中央寄せは flex ではなく
+   この 1 行が受け持つ。テイクが並ぶときに巻き込まれないように） */
+#placeholder-text { text-align:center; padding:34px 0; }
+.stat-card .card-body { padding:11px 12px; }
+
+/* ══ 一段組みのタブ ════════════════════════════════════
+   柱を立てないタブ（辞書など）の並び。モックでは .work-full が
+   余白と縦スクロールも持つが、本体では .main-content が両方持って
+   いる。ここで同じものを足すと余白が二重になり、入れ子のスクロール
+   ができる。桁割りだけを引き受ける。 */
+.work-full {
+  display:grid; grid-template-columns:repeat(12,1fr); gap:var(--u);
+  align-content:start; align-items:start; min-width:0;
+}
+
+/* ══ 辞書タブ ══════════════════════════════════════════
+   説明 → 追加する行 → 登録済み、という本体の構成を保ちつつ、
+   長い説明は畳んで最後へ回す（毎回読むものではない）。 */
+
+/* 表が主役。横に広げても得がないので幅を抑える */
+.dict-w { grid-column:span 9; }
+
+/* 表記 → 読み の向きを矢印で示す。左右の幅は同じにする */
+.add { display:flex; align-items:center; gap:9px; padding:13px 14px; }
+.add .w { flex:2; min-width:0; }
+.add .w input { width:100%; }
+.add .arrow { flex-shrink:0; color:var(--gold); font-size:13px; }
+.add .memo { flex:1.4; min-width:0; }
+.add .memo input { width:100%; }
+.add .btn { flex-shrink:0; white-space:nowrap; }
+
+.eg { padding:0 14px 12px; }
+
+.dict { width:100%; border-collapse:collapse; font-size:12.5px; }
+.dict th {
+  font-size:10px; font-weight:400; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--gold); opacity:.85; text-align:left; padding:0 12px 7px;
+  border-bottom:1px solid var(--gold-faint); white-space:nowrap;
+}
+.dict td { padding:8px 12px; border-bottom:1px solid var(--line); vertical-align:middle; }
+.dict tr:last-child td { border-bottom:none; }
+.dict tbody tr:hover { background:rgba(255,255,255,.022); }
+/* 色と字送りは中身にだけ効かせる。見出しに当てると
+   d-m だけ字が大きくなり、見出しの行が揃わない。 */
+.dict td.d-w { color:var(--text); }
+/* 読みは表記と対になるので、色を変えて対応が追えるようにする */
+.dict td.d-y { color:var(--accent); letter-spacing:.04em; }
+.dict td.d-m { color:var(--faint); font-size:11.5px; }
+/* 削除列。border-box なので 34px は padding 込み。中の 24px ボタンと
+   左右 12px の padding で実寸は 48px に落ち着く（表は指定幅を下限として扱う）。 */
+.dict .d-x { width:34px; text-align:right; }
+.dict .d-x button {
+  width:24px; height:24px; display:inline-flex; align-items:center; justify-content:center;
+  background:none; border:none; color:var(--faint); border-radius:var(--r-in);
+  opacity:0; transition:opacity .12s, color .12s, background .12s;
+}
+.dict tr:hover .d-x button { opacity:1; }
+.dict .d-x button:hover { color:var(--ng); background:rgba(255,255,255,.06); }
+
+.dict-empty { padding:34px 14px; text-align:center; font-size:12px; color:var(--faint); }
+
+/* 使い方。毎回は読まないので畳んで一番下に置く */
+.how { padding:0 14px 13px; }
+.how-body { display:flex; flex-direction:column; gap:9px; padding-top:10px; }
+.how p { font-size:11.5px; line-height:1.9; color:var(--muted); }
+.how b { color:var(--text); font-weight:600; }
+.how code {
+  font-family:"Cascadia Mono",Consolas,monospace; font-size:11px;
+  padding:1px 6px; border-radius:0;
+  background:var(--sunk); border:1px solid var(--line); color:var(--accent);
+}
+
+/* ══ マージタブ ════════════════════════════════════════
+   LoRA スロット（最大 3）→ マージ方法と名前 → 実行。
+   比率は合計 100% になるよう自動で配り直される。数字を追わなくても
+   取り合いが見えるよう、内訳を 1 本の帯で出す。 */
+.mix { padding:13px 14px; }
+
+/* 1 スロット 1 行。選ぶ・比率・外すを横に並べる */
+.slot {
+  display:flex; align-items:center; gap:12px;
+  padding:11px 0; border-bottom:1px solid var(--line);
+}
+.slot:last-of-type { border-bottom:none; }
+.slot .no {
+  flex-shrink:0; width:18px; text-align:center;
+  font-size:11px; color:var(--faint); font-variant-numeric:tabular-nums;
+}
+.slot .pick { flex:2; min-width:0; }
+.slot .pick select { width:100%; }
+/* 比率はスライダーと数字を縦に積む。横に置くと数字が動いて読みにくい */
+.slot .ratio { flex:3; min-width:0; display:flex; flex-direction:column; gap:3px; }
+.slot .ratio input[type="range"] { width:100%; }
+.ratio-t { display:flex; align-items:baseline; gap:6px; font-size:11px; color:var(--muted); }
+.ratio-t b { margin-left:auto; color:var(--accent); font-weight:700;
+             font-variant-numeric:tabular-nums; font-size:12.5px; }
+.slot .del {
+  flex-shrink:0; width:25px; height:25px; display:grid; place-items:center;
+  background:none; border:none; color:var(--faint); border-radius:var(--r-in);
+  transition:color .12s, background .12s;
+}
+.slot .del:hover { color:var(--ng); background:rgba(255,255,255,.06); }
+
+.slot-foot { padding-top:12px; }
+
+/* 内訳。どれがどれだけ効くかを 1 本の帯で見せる */
+.mixbar {
+  display:flex; height:6px; margin-top:14px; border-radius:0; overflow:hidden;
+  border:1px solid var(--gold-faint);
+}
+/* 色が接する境目に地の色で細い切れ目を入れる。
+   隣り合う色が近いときでも、どこで分かれているかが分かる。 */
+.mixbar i { display:block; height:100%; }
+.mixbar i + i { border-left:1px solid var(--l0); }
+/* 3 色は互いに離す。緑と水色は隣り合うと帯の中で境目が読めない。
+   金（暖）→ 朱（暖・別方向）→ 藍（寒）の順にして色相を散らす。 */
+.mixbar i:nth-child(1) { background:var(--accent); }
+.mixbar i:nth-child(2) { background:var(--c1); }
+.mixbar i:nth-child(3) { background:var(--c5); }
+.mixkey { display:flex; gap:16px; margin-top:8px; flex-wrap:wrap; }
+.mixkey span { display:inline-flex; align-items:center; gap:6px; font-size:11px; color:var(--muted); }
+.mixkey i { width:8px; height:8px; border-radius:0; flex-shrink:0; }
+.mixkey span:nth-child(1) i { background:var(--accent); }
+.mixkey span:nth-child(2) i { background:var(--c1); }
+.mixkey span:nth-child(3) i { background:var(--c5); }
+
+/* 出力の設定 */
+.out { display:grid; grid-template-columns:1fr 2fr; gap:12px 20px; padding:13px 14px; }
+.out .wide { grid-column:1 / -1; }
+.out input, .out select { width:100%; }
+
+.run-row { display:flex; align-items:center; gap:12px; padding:0 14px 13px; }
+
+/* ══ 朗読タブ ══════════════════════════════════════════
+   本を読ませる画面。長時間ここを開いたままにするので、
+   本文を主役にして設定は右の柱へ畳む。
+
+   本体は 6 区画がすべて同じ濃さで縦に並んでいた。
+     ・上に固定の操作帯（ファイルと再生としおり）
+     ・下に本文（残り全部）
+     ・設定は右の柱
+   の 3 つに整理する。 */
+
+/* 本文が主役なので、朗読タブだけは縦を使い切る。
+   .main-content は padding と縦スクロールを持っているが、朗読では
+   本文カードの中だけで巻き取りたい。このタブのときだけ両方を外し、
+   高さを丸ごと .narr に渡す（position を使うと .main-content に
+   位置の基準が無く、ヘッダの裏へ回り込む）。 */
+.main-content:has(> .tab-pane.active[data-tab="narrate"]) {
+  padding:0; overflow:hidden; display:flex;
+}
+.tab-pane.active[data-tab="narrate"] { flex:1; min-height:0; display:flex; }
+.narr {
+  flex:1; min-height:0; min-width:0;
+  display:grid; grid-template-columns:minmax(0,1fr) 250px; overflow:hidden;
+}
+.narr-main {
+  display:flex; flex-direction:column; overflow:hidden;
+  padding:calc(var(--u)*1.5); gap:var(--u); min-width:0;
+}
+
+/* 操作帯。読んでいる間ずっと目に入る場所なので額装して独立させる。
+   クラス名を .bar にしないこと。共有の .bar は高さ 3px の進捗バーで、
+   当てると操作帯ごと 3px に潰れる。 */
+.ctrl { flex:0 0 auto; }
+.ctrl-file { display:flex; align-items:center; gap:8px; padding:9px 11px; border-bottom:1px solid var(--gold-faint); }
+.ctrl-file input { flex:1; min-width:0; }
+
+.ctrl-play { display:flex; align-items:center; gap:11px; padding:11px 12px; }
+/* 再生だけ大きくする。押す回数が段違いに多い。
+   伸び縮みは両方止める。grow を止めないと横に伸びて楕円になり、
+   basis を入れると中身の中央揃えが崩れてアイコンが左端へ寄る。 */
+.pbtn {
+  display:inline-flex; align-items:center; justify-content:center;
+  width:30px; height:30px; padding:0; flex:0 0 auto;
+  border-radius:var(--r-in); background:none; border:1px solid var(--line-2);
+  color:var(--muted); transition:color .14s,border-color .14s,background .14s;
+}
+.pbtn:hover { color:var(--text); border-color:var(--accent-ln); background:var(--accent-dim); }
+.pbtn.main {
+  width:38px; height:38px; border-radius:50%;
+  background:var(--accent-dim); border-color:var(--accent-ln); color:var(--accent);
+}
+.pbtn.main:hover { background:var(--accent); color:var(--on-accent); box-shadow:0 0 18px -4px var(--accent); }
+
+/* 進み具合。棒の下に「いま何行目か」を添える */
+.pos { flex:1; min-width:0; }
+.pos-bar { height:3px; border-radius:2px; background:var(--line); overflow:hidden; }
+/* 幅は renderer.js が入れる。既定を 0 にしておかないと、ファイルを開く
+   前（updateMeta がまだ走っていない間）に親いっぱいまで伸びて、
+   何も読んでいないのに読み終えたように見える。 */
+.pos-bar > i { display:block; width:0; height:100%; background:var(--accent); box-shadow:0 0 8px -1px var(--accent); }
+.pos-t { display:flex; align-items:baseline; gap:8px; margin-top:6px; font-size:11px; color:var(--faint); }
+.pos-t b { color:var(--muted); font-weight:600; font-variant-numeric:tabular-nums; }
+.pos-t .st { margin-left:auto; color:var(--c5); }
+
+/* 本文。残りの縦を全部もらい、あふれたぶんはここの中だけで巻き取る */
+.text-card { flex:1 1 auto; display:flex; flex-direction:column; min-height:0; }
+.text { flex:1; overflow-y:auto; padding:18px 20px; }
+.chunk {
+  padding:7px 12px; border-radius:0; border-left:2px solid transparent;
+  font-size:14.5px; line-height:2.0; color:var(--muted);
+  transition:color .14s, background .14s, border-color .14s;
+  cursor:pointer;
+}
+.chunk:hover { background:rgba(255,255,255,.022); color:var(--text); }
+/* 読んでいる行。色だけでなく左の罫と字の濃さでも示す */
+.chunk.now { color:var(--text); background:var(--accent-dim); border-left-color:var(--accent); }
+/* 読み終えた行は沈める。どこまで進んだかが一目で分かる */
+.chunk.done { color:var(--faint); }
+.chunk.para { margin-top:16px; }
+
+.text-empty { padding:60px 20px; text-align:center; }
+.text-empty p { font-size:12.5px; color:var(--faint); }
+
+/* 右の柱 */
+.narr-side {
+  overflow-y:auto; border-left:1px solid var(--gold-dim);
+  background:linear-gradient(180deg, rgba(255,255,255,.013), transparent 240px), var(--l1);
+}
+.narr-side .grp { border-bottom:1px solid var(--gold-faint); padding:11px 12px; }
+.narr-side .grp:last-child { border-bottom:none; }
+/* 声の出どころは合成タブ任せ。そこを最初に伝える */
+.from {
+  display:flex; gap:8px; padding:11px 12px;
+  border-bottom:1px solid var(--gold-faint);
+  font-size:11px; line-height:1.7; color:var(--faint);
+}
+.from .i { color:var(--gold); margin-top:2px; flex-shrink:0; }
+.from b { color:var(--muted); font-weight:600; }
+
+/* ══ データセットタブ ══════════════════════════════════
+   右の柱は置かない。一覧が主役で、幅を分けても得がない。
+   工程が 4 つあるので番号を打って現在地が分かるようにする。 */
+
+/* ── 既存の一覧 ── */
+.ds-row {
+  display:flex; align-items:center; gap:12px;
+  height:36px; padding:0 12px;
+  border-bottom:1px solid var(--line); cursor:default;
+  transition:background .12s;
+}
+.ds-row:last-child { border-bottom:none; }
+.ds-row:hover { background:rgba(255,255,255,.022); }
+.ds-row .nm { flex:1; min-width:0; font-size:12.5px;
+              overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* 数字は等幅。桁が変わっても列が動かない */
+.ds-row .num { font-size:11.5px; color:var(--muted); font-variant-numeric:tabular-nums;
+               width:110px; text-align:right; flex-shrink:0; }
+.ds-row .dur { font-size:11.5px; color:var(--faint); font-variant-numeric:tabular-nums;
+               width:72px; text-align:right; flex-shrink:0; }
+.ds-row .acts { display:flex; gap:1px; flex-shrink:0; opacity:0; transition:opacity .12s; }
+.ds-row:hover .acts { opacity:1; }
+.ds-row .acts button {
+  display:grid; place-items:center; width:25px; height:25px; border-radius:var(--r-in);
+  background:none; border:none; color:var(--faint); transition:color .12s,background .12s;
+}
+.ds-row .acts button:hover { background:rgba(255,255,255,.07); color:var(--text); }
+.ds-row .acts button.del:hover { color:var(--ng); }
+
+/* ── 工程 ── 番号は飾りではなく順序。丸で囲って独立させる */
+.step { border-bottom:1px solid var(--gold-faint); padding:13px 14px; }
+.step:last-child { border-bottom:none; }
+.step-hd { display:flex; align-items:center; gap:9px; margin-bottom:10px; }
+.step-no {
+  display:grid; place-items:center; width:19px; height:19px; flex-shrink:0;
+  border:1px solid var(--gold-dim); border-radius:50%;
+  font-size:10.5px; color:var(--gold); font-variant-numeric:tabular-nums;
+}
+.step-t { font-size:12px; color:var(--text); letter-spacing:.04em; }
+.step-note { font-size:10.5px; color:var(--faint); margin-left:auto; }
+
+/* 受け皿。破線で「ここに落とせる」ことだけ伝える */
+.drop {
+  display:flex; flex-direction:column; align-items:center; gap:9px;
+  padding:22px 14px; border:1px dashed var(--line-2); border-radius:0;
+  background:var(--sunk); text-align:center;
+}
+.drop p { font-size:11.5px; color:var(--faint); }
+.drop .row { display:flex; gap:7px; }
+.drop.drag-over { border-color:var(--accent-ln); background:var(--accent-dim); }
+
+/* 足した音源 */
+.src-list { margin-top:10px; display:flex; flex-direction:column; }
+.src-item {
+  display:flex; align-items:center; gap:9px; height:30px; padding:0 10px;
+  border-bottom:1px solid var(--line); font-size:11.5px;
+}
+.src-item:last-child { border-bottom:none; }
+.src-item .fn { flex:1; min-width:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.src-item button {
+  width:22px; height:22px; display:grid; place-items:center; flex-shrink:0;
+  background:none; border:none; color:var(--faint); border-radius:var(--r-in);
+}
+.src-item button:hover { color:var(--ng); background:rgba(255,255,255,.06); }
+
+/* 工程 2 の条件 */
+.opt-row { display:flex; align-items:center; gap:16px; flex-wrap:wrap; }
+.chk { display:flex; align-items:center; gap:7px; font-size:11.5px; color:var(--muted); cursor:pointer; }
+.chk input { accent-color:var(--accent); margin:0; }
+.num-f { display:flex; align-items:center; gap:6px; font-size:11.5px; color:var(--muted); }
+.num-f input[type="number"] { width:66px; }
+.num-f .u { color:var(--faint); font-size:10.5px; }
+
+/* 工程 3 の表。行数が多いので密度を上げる */
+.clips { width:100%; border-collapse:collapse; font-size:12px; }
+.clips th {
+  font-size:10px; font-weight:400; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--gold); opacity:.85; text-align:left; padding:0 8px 7px;
+  border-bottom:1px solid var(--gold-faint); white-space:nowrap;
+}
+.clips td { padding:6px 8px; border-bottom:1px solid var(--line); vertical-align:middle; }
+.clips tr:last-child td { border-bottom:none; }
+.clips tbody tr:hover { background:rgba(255,255,255,.022); }
+.clips .c-no  { width:34px; color:var(--faint); font-variant-numeric:tabular-nums; }
+.clips .c-dur { width:56px; color:var(--muted); font-variant-numeric:tabular-nums; }
+/* 再生と波形は必ず横並び。canvas は既定が inline なので
+   改行の空白で折り返し、放っておくと 2 行になって行が倍の高さになる。 */
+.clips .c-aud { width:132px; }
+.clips .c-aud > div { display:flex; align-items:center; gap:8px; }
+.clips .c-use { width:44px; text-align:center; }
+/* 書き起こしは直せる。枠を出さず、触れたときだけ入力欄に見せる */
+.clips .c-txt input {
+  width:100%; height:26px; background:transparent; border:1px solid transparent;
+  padding:0 6px; font-size:12px;
+}
+.clips .c-txt input:hover { border-color:var(--line); }
+.clips .c-txt input:focus { background:var(--sunk); }
+.clips .mini-wave { width:100px; height:16px; opacity:.6; vertical-align:middle;
+                    color:var(--accent); flex-shrink:0; }
+.clips input[type="checkbox"] { accent-color:var(--accent); }
+/* 使わない行は沈める。消さずに残すことで戻せる */
+.clips tr.off .c-txt input, .clips tr.off .c-dur { opacity:.35; }
+.clips tr.off .mini-wave { opacity:.18; }
+
+/* 小さな再生ボタン */
+.play-sm {
+  width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center;
+  flex-shrink:0; padding:0; border-radius:50%;
+  background:none; border:1px solid var(--line-2); color:var(--muted);
+  transition:color .12s,border-color .12s,background .12s;
+}
+.play-sm:hover { color:var(--accent); border-color:var(--accent-ln); background:var(--accent-dim); }
+
+.stats { display:flex; gap:16px; margin-top:9px; font-size:11px; color:var(--faint); }
+.stats b { color:var(--muted); font-weight:700; font-variant-numeric:tabular-nums; }
+
+/* 工程 4 の保存 */
+.save-row { display:flex; gap:8px; align-items:center; }
+.save-row input { flex:1; min-width:0; }
+.path-row { display:flex; gap:8px; align-items:center; margin-top:9px; font-size:11px; }
+.path-row .p { color:var(--faint); word-break:break-all; }
+
+/* 注意書き。絵文字を使わず、色と枠で警告だと分からせる */
+.note.warn {
+  color:var(--gold); border-left:2px solid var(--gold-dim);
+  padding-left:9px; margin-top:8px;
+}
+/* ラベルの中に差し込む短い警告（話速を上げすぎたとき等） */
+.warn-inline { color:var(--gold); font-size:10.5px; }
+
+/* ══ 学習タブ ══════════════════════════════════════════
+   学習は数十分から数時間かかる。走っている間に見るのは
+   「あとどれくらいか」と「損失が下がっているか」の 2 つなので、
+   実行中の区画だけ主役（lift）にして先頭に置く。 */
+
+/* 設定の並び。項目名が長いので 2 列。3 列にすると値の欄が読めない */
+.cfg { display:grid; grid-template-columns:1fr 1fr; gap:12px 20px; padding:13px 14px; }
+.cfg .param-group { margin:0; min-width:0; }
+.cfg .wide { grid-column:1 / -1; }
+.cfg input, .cfg select { width:100%; }
+
+.act-row {
+  display:flex; align-items:center; gap:8px; flex-wrap:wrap;
+  padding:0 14px 13px;
+}
+
+.run { padding:13px 14px; }
+/* 走っていないとき。責める書き方をせず、次にやることだけ添える */
+.run-empty { padding:26px 14px; text-align:center; }
+.empty-t { font-size:12.5px; color:var(--muted); }
+.empty-d { margin-top:6px; font-size:11px; color:var(--faint); }
+.run-top { display:flex; align-items:baseline; gap:12px; margin-bottom:11px; flex-wrap:wrap; }
+.run-name { font-size:13.5px; color:var(--text); }
+.run-ds { font-size:11.5px; color:var(--faint); }
+.run-id { font-size:10.5px; color:var(--faint); opacity:.7;
+          font-family:"Cascadia Mono",Consolas,monospace; }
+.run-state {
+  margin-left:auto; display:inline-flex; align-items:center; gap:6px;
+  height:21px; padding:0 9px; border-radius:0;
+  font-size:10.5px; font-weight:600; letter-spacing:.10em;
+  color:var(--c5); border:1px solid color-mix(in srgb, var(--c5) 32%, transparent);
+}
+.run-state .dot { width:5px;height:5px;border-radius:50%;background:currentColor;
+                  box-shadow:0 0 7px 1px currentColor; }
+
+/* 進捗。数字は棒の上に置いて、目を動かさず両方読めるようにする */
+.prog-t { display:flex; align-items:baseline; gap:8px; margin-bottom:5px; font-size:11.5px; color:var(--muted); }
+.prog-t b { color:var(--text); font-weight:700; font-variant-numeric:tabular-nums; font-size:13px; }
+.prog-t b .of { color:var(--muted); font-weight:500; font-size:11.5px; }
+.prog-t .pct { margin-left:auto; color:var(--accent); font-weight:700;
+               font-variant-numeric:tabular-nums; font-size:13px; }
+.prog-t .eta { color:var(--faint); font-variant-numeric:tabular-nums; }
+.prog { height:4px; border-radius:2px; background:var(--line); overflow:hidden; }
+.prog > i { display:block; width:0; height:100%; background:var(--accent);
+            box-shadow:0 0 10px -1px var(--accent); }
+
+/* 損失。下がっているかだけ分かればよいので、数字と増減を並べる */
+.loss-row { display:flex; align-items:center; gap:26px; margin-top:13px; }
+.loss { display:flex; flex-direction:column; gap:3px; }
+.loss-k { font-size:10.5px; color:var(--faint); letter-spacing:.10em; text-transform:uppercase; }
+.loss-v { font-size:15px; color:var(--text); font-weight:700; font-variant-numeric:tabular-nums; }
+.loss-v .d { font-size:11px; font-weight:500; margin-left:6px; }
+.loss-v .down { color:var(--ok); }
+.loss-v .up   { color:var(--ng); }
+/* 推移は幅を使うほど傾きが読める。数字の隣に押し込まず横いっぱいに引く。
+   canvas は既定が inline なので block にする。 */
+.spark { display:block; width:100%; height:78px; margin-top:11px; opacity:.9;
+         color:var(--accent); }
+
+.run-foot { display:flex; align-items:center; gap:8px; margin-top:14px; }
+
+/* 記録。等幅で、折り返さず流す */
+.log {
+  margin-top:11px; max-height:132px; overflow:auto;
+  background:var(--sunk); border:1px solid var(--line); border-radius:0;
+  padding:8px 10px; font-family:"Cascadia Mono",Consolas,monospace;
+  font-size:10.5px; line-height:1.7; color:var(--muted); white-space:pre;
+}
+.log .t { color:var(--faint); }
+.log-sum {
+  list-style:none; display:flex; align-items:center; gap:7px; height:26px;
+  margin-top:8px; font-size:11px; color:var(--gold); opacity:.85; cursor:pointer;
+}
+.log-sum::-webkit-details-marker { display:none; }
+
+/* 削除は並びから離す。隣に置くと押し間違える */
+.btn-danger { color:var(--ng); border-color:color-mix(in srgb, var(--ng) 34%, transparent); }
+.btn-danger:hover { color:#fff; background:color-mix(in srgb, var(--ng) 22%, transparent);
+                    border-color:var(--ng); }
+
+.test-results { padding:0 14px 13px; }
+
+/* 履歴 */
+.jobs { width:100%; border-collapse:collapse; font-size:12px; }
+.jobs th {
+  font-size:10px; font-weight:400; letter-spacing:.14em; text-transform:uppercase;
+  color:var(--gold); opacity:.85; text-align:left; padding:0 10px 7px;
+  border-bottom:1px solid var(--gold-faint); white-space:nowrap;
+}
+.jobs td { padding:7px 10px; border-bottom:1px solid var(--line); white-space:nowrap; }
+.jobs tr:last-child td { border-bottom:none; }
+.jobs tbody tr:hover { background:rgba(255,255,255,.022); }
+.jobs .j-name { width:auto; color:var(--text); }
+.jobs .num { text-align:right; font-variant-numeric:tabular-nums; color:var(--muted); }
+.jobs th.num { text-align:right; }
+.jobs .j-date { color:var(--faint); font-variant-numeric:tabular-nums; }
+
+/* 状態は色だけに頼らず、字でも示す。地は塗らず枠と字の色で分ける
+   （旧 .state-badge は角丸の塗りだったので、こちらで置き換える）。 */
+.badge {
+  display:inline-flex; align-items:center; gap:5px; height:20px; padding:0 8px;
+  border-radius:0; font-size:10.5px; font-weight:600; letter-spacing:.06em;
+  border:1px solid currentColor; background:transparent;
+}
+.badge.done { color:var(--ok); }
+.badge.run  { color:var(--c5); }
+.badge.fail { color:var(--ng); }
+.badge.stop { color:var(--c2); }
+
+/* ══ 青空文庫 ══════════════════════════════════════════
+   探す → 見つかったもの → 選んだもの、の 3 区画。 */
+
+.find { padding:13px 14px; }
+.find-row { display:flex; gap:8px; align-items:center; }
+.find-row input { flex:1; min-width:0; }
+.find-row select { flex:0 0 150px; }
+.by-code { margin-top:12px; padding-top:11px; border-top:1px solid var(--line); }
+.find-foot { display:flex; align-items:baseline; gap:10px; margin-top:11px; }
+
+/* 取得の進み具合。走っているときだけ出る */
+.grab { display:flex; align-items:center; gap:10px; margin-top:12px; }
+.grab-bar { flex:1; height:3px; border-radius:2px; background:var(--line); overflow:hidden; }
+.grab-bar > i { display:block; width:0; height:100%; background:var(--accent); box-shadow:0 0 8px -1px var(--accent); }
+.grab-t { font-size:11px; color:var(--muted); font-variant-numeric:tabular-nums; flex-shrink:0; }
+
+/* 見つかったもの。あらすじが付くので 1 件が高い */
+.hits { max-height:420px; overflow-y:auto; }
+.hit {
+  padding:11px 14px; border-bottom:1px solid var(--line);
+  cursor:pointer; transition:background .12s;
+}
+.hit:last-child { border-bottom:none; }
+.hit:hover { background:rgba(255,255,255,.022); }
+.hit.on { background:var(--accent-dim); box-shadow:inset 2px 0 0 var(--accent); }
+.hit-t { display:flex; align-items:baseline; gap:9px; }
+.hit-t .t { font-size:13.5px; color:var(--text); }
+.hit-t .got {
+  margin-left:auto; flex-shrink:0;
+  display:inline-flex; align-items:center; height:19px; padding:0 8px;
+  border-radius:0; font-size:10px; font-weight:600; letter-spacing:.06em;
+  color:var(--ok); border:1px solid color-mix(in srgb, var(--ok) 32%, transparent);
+}
+.hit-m { margin-top:4px; font-size:11px; color:var(--faint); }
+/* あらすじは 2 行で切る。全文は選んでから読ませる */
+.hit-s {
+  margin-top:5px; font-size:11.5px; line-height:1.7; color:var(--muted); opacity:.8;
+  display:-webkit-box; -webkit-line-clamp:2; -webkit-box-orient:vertical; overflow:hidden;
+}
+
+/* 青空文庫はあらすじが無いので 1 行に収める。
+   .hit を縦に積む使い方もあるので、こちらだけ横並びにする。 */
+.hit.one { display:flex; align-items:baseline; gap:12px; padding:0 14px; height:36px; }
+.hit.one .t { font-size:12.5px; color:var(--text);
+              overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.hit.one .a { font-size:11.5px; color:var(--faint); flex-shrink:0; }
+.hit.one .got { margin-left:auto; }
+.by-url { margin-top:12px; padding-top:11px; border-top:1px solid var(--line); }
+.hits-empty { padding:34px 14px; text-align:center; }
+
+/* 選んだもの */
+.pick { padding:14px; }
+.pick-a { margin-top:5px; font-size:11.5px; color:var(--faint); }
+.pick-t { font-family:"Yonaga",serif; font-size:17px; color:var(--text); letter-spacing:.04em; }
+.pick-m { margin-top:5px; font-size:11.5px; color:var(--faint); }
+.pick-s {
+  margin-top:11px; padding:10px 12px;
+  background:var(--sunk); border:1px solid var(--line); border-radius:0;
+  font-size:11.5px; line-height:1.9; color:var(--muted);
+  max-height:96px; overflow-y:auto;
+}
+.pick-act { display:flex; align-items:center; gap:9px; margin-top:13px; flex-wrap:wrap; }
+
+/* 目次。話数が多いので 1 行 1 話で詰め、下読みは hover で出す */
+.chaps { margin-top:14px; border-top:1px solid var(--gold-faint); max-height:220px; overflow-y:auto; }
+.chap {
+  display:flex; align-items:center; gap:10px;
+  padding:0 12px; height:32px; border-bottom:1px solid var(--line);
+}
+.chap:last-child { border-bottom:none; }
+.chap:hover { background:rgba(255,255,255,.022); }
+.chap .no {
+  flex-shrink:0; width:34px; text-align:right;
+  font-size:11px; color:var(--faint); font-variant-numeric:tabular-nums;
+}
+.chap .st { flex:1; min-width:0; font-size:12.5px; color:var(--muted);
+            overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.chap:hover .st { color:var(--text); }
+.chap .pv { flex-shrink:0; opacity:0; transition:opacity .12s; }
+.chap:hover .pv, .chap .pv:focus-visible { opacity:1; }
+
+/* 下読み */
+.pv-box {
+  margin-top:12px; padding:12px 14px;
+  background:var(--sunk); border:1px solid var(--gold-faint); border-radius:0;
+}
+.pv-hd { display:flex; align-items:baseline; gap:9px; margin-bottom:9px; }
+.pv-hd .cap { font-size:10px; }
+.pv-hd .st { font-size:12px; color:var(--muted); }
+.pv-body {
+  font-size:12.5px; line-height:1.95; color:var(--muted);
+  max-height:150px; overflow-y:auto;
+}
+
+/* 保存の結果 */
+.saved {
+  display:flex; align-items:center; gap:9px; margin-top:12px;
+  padding:9px 11px; border:1px solid var(--gold-faint); border-radius:0;
+  font-size:11.5px; color:var(--muted); flex-wrap:wrap;
+}
+.saved .ok { display:inline-flex; align-items:center; color:var(--ok); flex-shrink:0; }
+.saved code {
+  font-family:"Cascadia Mono",Consolas,monospace; font-size:10.5px;
+  padding:1px 6px; border-radius:0;
+  background:var(--l0); border:1px solid var(--line); color:var(--accent);
+  word-break:break-all;
+}
+
+/* ══ LoRA 管理（かぶせ）══════════════════════════════════
+   生成タブの「LoRA を管理」から開く。タブではないので画面にかぶせる。
+   実データは 181 体ある。素の表では探せないので、上に絞り込みを置き、
+   1 行 1 体にして、取り込みは普段畳んでおく。 */
+
+/* 後ろの画面は隠すのではなく沈める。どのタブから開いたか分かるように。
+   .hidden は display:none !important なので、開閉はそちらが受け持つ。 */
+.veil {
+  position:fixed; inset:0; z-index:50;
+  background:rgba(0,0,0,.62); backdrop-filter:blur(2px);
+  display:grid; place-items:center; padding:40px 24px;
+}
+/* 箱。額装は他と同じ二重の金枠。中身が増えても画面外へ出ないよう伸縮させる。
+   高さの上限は % ではなく画面基準で取る。grid の子に対する max-height:100%
+   は解決されず、180 体並べると箱ごと画面より高くなって閉じるボタンが
+   画面外へ出た（幕の上下 padding 40px を引いた値を上限にする）。 */
+.sheet {
+  position:relative; width:min(880px, 100%); max-height:calc(100vh - 80px);
+  display:flex; flex-direction:column;
+  background:var(--l2); border:2px solid var(--gold-dim); border-radius:var(--r);
+  box-shadow:var(--e3);
+}
+.sheet::before {
+  content:""; position:absolute; inset:3px; pointer-events:none;
+  border:1px solid var(--gold-faint); border-radius:0;
+}
+.sheet-hd {
+  display:flex; align-items:center; gap:10px; height:40px; padding:0 14px;
+  border-bottom:1px solid var(--gold-faint); flex-shrink:0;
+}
+.sheet-x {
+  width:26px; height:26px; display:grid; place-items:center; flex-shrink:0;
+  background:none; border:none; color:var(--faint); border-radius:var(--r-in);
+  transition:color .12s, background .12s;
+}
+.sheet-x:hover { color:var(--text); background:rgba(255,255,255,.06); }
+/* 中身だけ巻き取る。見出しと取り込みは常に見えるようにする */
+.sheet-body { overflow-y:auto; flex:1; min-height:0; }
+
+/* 絞り込み */
+.filt { display:flex; align-items:center; gap:9px; padding:12px 14px;
+        border-bottom:1px solid var(--line); }
+.filt .q { flex:1; min-width:0; }
+.filt .q input { width:100%; }
+.seg { display:flex; flex-shrink:0; border:1px solid var(--line-2); border-radius:0; }
+.seg button {
+  height:29px; padding:0 12px; background:none; border:none;
+  font-size:11.5px; color:var(--muted); letter-spacing:.04em; white-space:nowrap;
+  transition:color .12s, background .12s;
+}
+.seg button + button { border-left:1px solid var(--line-2); }
+.seg button:hover { color:var(--text); background:rgba(255,255,255,.04); }
+.seg button[aria-pressed="true"] { color:var(--on-accent); background:var(--accent); }
+/* 件数はベース名より一段沈める。等幅で桁が変わっても幅が動かない */
+.seg button i { font-style:normal; opacity:.6; font-size:10.5px;
+                font-variant-numeric:tabular-nums; margin-left:3px; }
+
+/* 一覧。1 行 1 体 */
+.rows .row {
+  display:flex; align-items:center; gap:12px;
+  padding:0 14px; height:38px; border-bottom:1px solid var(--line);
+}
+.rows .row:last-child { border-bottom:none; }
+.rows .row:hover { background:rgba(255,255,255,.022); }
+.rows .nm { flex:0 0 190px; font-size:12.5px; color:var(--text);
+            overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+/* ベースは色だけでなく字でも示す。4 種とも色を分ける */
+.tagb {
+  flex-shrink:0; display:inline-flex; align-items:center; height:19px; padding:0 7px;
+  border-radius:0; font-size:10px; font-weight:600; letter-spacing:.06em;
+  border:1px solid currentColor;
+}
+.tagb.v4 { color:var(--accent); }
+.tagb.v3 { color:var(--c5); }
+.tagb.v2 { color:var(--c2); }
+.tagb.vd { color:var(--c1); }
+.rows .memo { flex:1; min-width:0; font-size:11px; color:var(--faint);
+              overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.rows .date { flex:0 0 96px; text-align:right; font-size:11px; color:var(--faint);
+              font-variant-numeric:tabular-nums; }
+/* 削除は普段沈めておく。181 体もあると常時出ていて誤って押す */
+.rows .del {
+  flex:0 0 25px; width:25px; height:25px; display:grid; place-items:center;
+  background:none; border:none; color:var(--faint); border-radius:var(--r-in);
+  opacity:0; transition:opacity .12s, color .12s, background .12s;
+}
+.rows .row:hover .del, .rows .del:focus-visible { opacity:1; }
+.rows .del:hover { color:var(--ng); background:rgba(255,255,255,.06); }
+.rows-empty { padding:40px 14px; text-align:center; font-size:12px; color:var(--faint); }
+
+/* 取り込み。開くのは新規登録のときだけ */
+.imp { border-top:1px solid var(--gold-faint); flex-shrink:0; }
+.imp > details > summary {
+  list-style:none; display:flex; align-items:center; gap:8px;
+  height:38px; padding:0 14px; cursor:pointer;
+  font-size:11.5px; color:var(--gold); opacity:.9;
+}
+.imp > details > summary::-webkit-details-marker { display:none; }
+.imp-body { display:grid; grid-template-columns:1fr 1fr; gap:11px 18px; padding:4px 14px 14px; }
+.imp-body .wide { grid-column:1 / -1; }
+.imp-body input, .imp-body select { width:100%; }
+/* 選んだ場所は入力欄ではないので、枠を出さず字だけで見せる */
+.pickrow { display:flex; align-items:center; gap:9px; }
+.pickrow .p { flex:1; min-width:0; font-size:11px; color:var(--faint);
+              overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+.imp-foot { display:flex; align-items:center; gap:9px; padding:0 14px 14px; }
+
+::-webkit-scrollbar { width:10px;height:10px; }
+::-webkit-scrollbar-track { background:transparent; }
+::-webkit-scrollbar-thumb { background:var(--line-2);border-radius:5px;border:3px solid var(--l0); }
+@media (prefers-reduced-motion:reduce) { *{transition:none!important;animation:none!important} }

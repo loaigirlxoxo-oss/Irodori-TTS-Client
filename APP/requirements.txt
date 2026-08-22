@@ -1,0 +1,13 @@
+# Extra Python deps required by the Electron app's FastAPI server.
+# Upstream pyproject.toml does NOT include these; install with:
+#
+#   .venv\Scripts\python.exe -m pip install -r APP\requirements.txt
+#
+# (transformers, torch, torchaudio, soundfile, huggingface_hub, peft are
+#  already pulled in by `uv sync` from pyproject.toml.)
+
+fastapi>=0.115
+uvicorn>=0.30
+pydantic>=2.5
+python-multipart>=0.0.9
+silero-vad>=6.0

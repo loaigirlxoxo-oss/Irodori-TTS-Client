@@ -1,0 +1,19 @@
+{
+  "name": "irodori-desktop",
+  "version": "1.0.0",
+  "description": "Irodori-TTS Desktop Application",
+  "main": "main.js",
+  "scripts": {
+    "start": "set ELECTRON_RUN_AS_NODE=&& electron .",
+    "pack": "electron-builder --dir",
+    "dist": "electron-builder"
+  },
+  "keywords": ["irodori", "tts", "electron"],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {},
+  "devDependencies": {
+    "electron": "^29.2.0",
+    "electron-builder": "^24.13.3"
+  }
+}

@@ -1,0 +1,1045 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Irodori-TTS</title>
+  <!-- フォントは同梱する。Google Fonts はオフラインで読めず、
+       Inter は日本語を持たないので日本語部分は結局 OS 任せだった。 -->
+  <link rel="stylesheet" href="style.css">
+  <!-- 意匠はここで上書きする。戻すときはこの 1 行を消す。 -->
+  <link rel="stylesheet" href="theme.css">
+</head>
+<body>
+  <!-- アイコンの実体。線画で統一する（絵文字は環境で字形が変わるので使わない）。
+       HTML パーサは <defs> 内の rect/circle を捨てるので、
+       ここに直接書かず renderer.js が SVG として差し込む。 -->
+  <div id="icon-sprite" hidden></div>
+
+  <div class="app-container">
+    <!-- 上部：銘と現在地と接続状態。全タブ共通 -->
+    <header class="hdr">
+      <div class="brand">
+        <img class="mk" src="assets/mark.png" alt="">
+        <img class="wm" src="assets/logo.png" alt="Irodori-TTS Client App">
+      </div>
+
+      <!-- Tab nav -->
+      <nav class="tab-bar nav">
+        <button class="tab-btn active" data-tab="synthesize"><svg class="i i-sm"><use href="#ic-wave"/></svg>生成</button>
+        <button class="tab-btn" data-tab="dataset"><svg class="i i-sm"><use href="#ic-db"/></svg>データセット</button>
+        <button class="tab-btn" data-tab="train"><svg class="i i-sm"><use href="#ic-spark"/></svg>学習</button>
+        <button class="tab-btn" data-tab="narrate"><svg class="i i-sm"><use href="#ic-book"/></svg>朗読</button>
+        <button class="tab-btn" data-tab="aozora"><svg class="i i-sm"><use href="#ic-sky"/></svg>青空文庫</button>
+        <button class="tab-btn" data-tab="loramix"><svg class="i i-sm"><use href="#ic-merge"/></svg>マージ</button>
+        <button class="tab-btn" data-tab="dict"><svg class="i i-sm"><use href="#ic-dict"/></svg>辞書</button>
+      </nav>
+
+      <div class="hdr-end">
+        <span class="status-badge" id="status-badge">Connecting...</span>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="main-content">
+      <!-- Synthesize tab -->
+      <div class="tab-pane active" data-tab="synthesize">
+      <!-- 右の柱。声にまつわる設定と、畳んだ詳細をここへ集める -->
+      <aside class="aside">
+
+        <!-- 声。常に開いている主役の設定なので額装する -->
+        <div class="grp grp-card">
+          <section class="card">
+            <div class="card-hd"><span class="cap">声</span></div>
+            <div class="card-body">
+              <div class="param-group">
+                <label for="model-type">モデル</label>
+                <select id="model-type">
+                  <option value="v4_1">v4.1-Small（推奨）</option>
+                  <option value="v4">v4-Small</option>
+                  <option value="v3">v3</option>
+                  <option value="v2">v2</option>
+                  <option value="v3_voice_design">v3 Voice Design</option>
+                  <option value="voice_design">v2 Voice Design</option>
+                </select>
+              </div>
+              <div class="conditioning-mode">
+                <label class="chk-line">
+                  <input type="radio" name="cond-mode" value="oneshot" checked> 1ショット
+                </label>
+                <label class="chk-line">
+                  <input type="radio" name="cond-mode" value="lora" id="cond-mode-lora"> LoRA
+                </label>
+              </div>
+              <div class="param-group">
+                <select id="lora-select" class="hidden"></select>
+                <span id="lora-voice-hint" class="note warn" style="display:none;"></span>
+              </div>
+              <button id="manage-loras-btn" class="btn btn-ghost btn-sm">LoRA を管理</button>
+            </div>
+          </section>
+        </div>
+
+        <!-- 参照ボイス。声の設定なので「声」の直下に置く -->
+        <div class="grp grp-card">
+          <section class="card">
+            <div class="card-hd">
+              <span class="cap">参照ボイス</span><span class="sp"></span>
+              <button id="voice-refresh-btn" class="btn btn-ghost btn-sm tip" data-tip="再読込" aria-label="再読込"><svg class="i i-sm"><use href="#ic-refresh"/></svg></button>
+              <!-- 一覧の取得元と同じ場所を開くこと（APP/voices/ を直接読む）。
+                   開く先がずれると「置いたのに出ない」の原因が追えなくなる。 -->
+              <button id="voice-folder-btn" class="btn btn-ghost btn-sm tip" data-tip="フォルダを開く" aria-label="フォルダを開く"><svg class="i i-sm"><use href="#ic-folder"/></svg></button>
+            </div>
+            <div class="card-body">
+              <!-- 一覧ではなくプルダウン。中身は renderer.js が入れる -->
+              <div id="voice-list" class="voice-list">
+                <!-- Injected via JS -->
+              </div>
+
+              <!-- 選んだものを聴いて確かめられるようにする -->
+              <div id="preview-audio-container" class="vpick hidden">
+                <button id="preview-play-btn" class="play play-sm tip" data-tip="聴く" aria-label="聴く"><svg class="i i-sm"><use href="#ic-play2"/></svg></button>
+                <canvas id="preview-wave" class="mini-wave"></canvas>
+                <audio id="preview-audio" class="hidden"></audio>
+              </div>
+
+              <!-- 足す。普段は畳んでおく -->
+              <details class="more">
+                <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>ボイスを足す</summary>
+                <div class="more-body" id="add-voice-form">
+                  <input type="text" id="new-voice-name" placeholder="名前（例: 落ち着いた女声）">
+                  <div id="drop-zone" class="drop">
+                    <p>WAV をここに落とす</p>
+                    <div class="row">
+                      <button id="select-wav-btn" class="btn btn-ghost btn-sm"><svg class="i i-sm"><use href="#ic-folder"/></svg>選ぶ</button>
+                    </div>
+                  </div>
+                  <span id="selected-wav-path" class="note">選ばれていません</span>
+                  <button id="save-voice-btn" class="btn btn-primary btn-sm"><svg class="i i-sm"><use href="#ic-plus"/></svg>追加</button>
+                </div>
+              </details>
+            </div>
+          </section>
+        </div>
+
+        <!-- ここから下は詳細。普段は畳んでおく。
+             もとは「Advanced / Expert」として 13 項目が 1 か所に並んでいたが、
+             何に効くかで 4 つに分けた。id は変えていない。 -->
+        <div class="grp">
+          <details class="more">
+            <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>ガイダンス詳細</summary>
+            <div class="more-body">
+              <div class="param-group">
+                <label>方式 <span class="en">cfg_guidance_mode</span></label>
+                <select id="param-cfg-mode">
+                  <option value="independent">independent</option>
+                  <option value="joint">joint</option>
+                  <option value="alternating">alternating</option>
+                </select>
+              </div>
+              <div class="param-group">
+                <label>スケジュール <span class="en">t_schedule_mode</span></label>
+                <select id="param-t-schedule-mode">
+                  <option value="linear">linear</option>
+                  <option value="sway">sway</option>
+                </select>
+              </div>
+              <div class="param-group">
+                <label>Sway 係数 <span class="en">sway_coeff</span><span class="v" id="val-sway-coeff">-1.0</span></label>
+                <input type="range" id="param-sway-coeff" min="-1.0" max="1.5" step="0.1" value="-1.0" disabled>
+              </div>
+              <div class="two">
+                <div class="param-group">
+                  <label>下限 t</label>
+                  <input type="number" id="param-cfg-min-t" step="0.1" value="0.5">
+                </div>
+                <div class="param-group">
+                  <label>上限 t</label>
+                  <input type="number" id="param-cfg-max-t" step="0.1" value="1.0">
+                </div>
+              </div>
+              <div class="param-group">
+                <label>一括指定 <span class="en">cfg_scale</span></label>
+                <input type="text" id="param-cfg" placeholder="空欄 = 個別値">
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <div class="grp">
+          <details class="more">
+            <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>出力の調整</summary>
+            <div class="more-body">
+              <div class="two">
+                <div class="param-group">
+                  <label>Truncation</label>
+                  <input type="text" id="param-truncation-factor" placeholder="なし">
+                </div>
+                <div class="param-group">
+                  <label>Rescale k</label>
+                  <input type="text" id="param-rescale-k" placeholder="なし">
+                </div>
+              </div>
+              <div class="two">
+                <div class="param-group">
+                  <label>Rescale σ</label>
+                  <input type="text" id="param-rescale-sigma" placeholder="なし">
+                </div>
+                <div class="param-group">
+                  <label>最大文字数</label>
+                  <input type="number" id="param-max-text-len" placeholder="自動">
+                </div>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <div class="grp">
+          <details class="more">
+            <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>話者 KV</summary>
+            <div class="more-body">
+              <div class="two">
+                <div class="param-group">
+                  <label>強さ <span class="en">scale</span></label>
+                  <input type="text" id="param-speaker-kv-scale" placeholder="なし">
+                </div>
+                <div class="param-group">
+                  <label>下限 t</label>
+                  <input type="text" id="param-speaker-kv-min-t" value="0.9">
+                </div>
+              </div>
+              <div class="param-group">
+                <label>最大レイヤ <span class="en">max_layers</span></label>
+                <input type="number" id="param-speaker-kv-max-lyr" placeholder="なし">
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <div class="grp">
+          <details class="more">
+            <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>実行環境</summary>
+            <div class="more-body">
+              <div class="param-group">
+                <label title="計算に使う装置。自動では GPU があればそちらを使います。CPU を選ぶと遅くなりますが、学習中に GPU を空けたいときや、GPU 側の切り分けに使えます。">計算装置 <span class="en">device</span><span class="v" id="val-device"></span></label>
+                <select id="param-device">
+                  <option value="auto">自動（既定）</option>
+                </select>
+              </div>
+              <div class="param-group">
+                <label title="計算に使う精度。bf16 は VRAM が約半分（実測 3460→1785 MiB）で済みますが、生成は 2 割ほど遅くなります（実測 fp32 1.45s 対 bf16 1.75s）。速度と VRAM の交換で、両立はしません。VRAM が足りない環境向けです。対応は Ampere（RTX 30 系）以降。">計算精度 <span class="en">precision</span><span class="v" id="val-precision"></span></label>
+                <select id="param-precision">
+                  <option value="auto">自動（既定）</option>
+                  <option value="fp32">fp32（確実・VRAM 多め）</option>
+                  <option value="bf16">bf16（VRAM 半分・やや遅い）</option>
+                </select>
+              </div>
+              <div class="param-group">
+                <label>Context KV cache</label>
+                <select id="param-context-kv">
+                  <option value="true">有効（既定）</option>
+                  <option value="false">無効</option>
+                </select>
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <!-- API のアドレス。モックには無いが、外から叩くときに要るので畳んで置く -->
+        <div class="grp">
+          <details class="more">
+            <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>API のアドレス</summary>
+            <div class="more-body">
+              <div class="api-url-box">
+                <input type="text" id="api-url-display" value="接続中..." readonly>
+                <button id="copy-api-btn" class="btn btn-ghost btn-sm" title="コピーする">コピー</button>
+              </div>
+              <p id="standard-api-hint" class="note">標準エンドポイント: 接続中...</p>
+            </div>
+          </details>
+        </div>
+      </aside>
+
+      <div class="work">
+
+        <!-- 入力。この画面の主役なので、額装して一段持ち上げる -->
+        <section class="input-region card lift editor span-12">
+          <!-- セリフの積み上げ。1 行 1 セリフで、行ごとに合成する。
+               1 行目の textarea は #text-input のまま（文字数・推定秒・
+               タグ挿入がこれを見ている）。2 行目からは renderer.js が足す。 -->
+          <div id="lines" class="lines">
+            <div class="line" data-line="0">
+              <span class="ln">1</span>
+              <div class="editor-field">
+                <textarea id="text-input" rows="1" placeholder="読ませたい文章を入力してください。"></textarea>
+                <span class="meta">
+                  <b id="char-counter">0</b> 字
+                  <span id="val-duration-estimate"></span>
+                </span>
+              </div>
+              <button class="ln-del tip" data-tip="この行を削除" aria-label="この行を削除"><svg class="i i-sm"><use href="#ic-x"/></svg></button>
+            </div>
+          </div>
+          <div class="lines-foot">
+            <button id="line-add" class="btn btn-ghost btn-sm"><svg class="i i-sm"><use href="#ic-plus"/></svg>次のセリフ</button>
+            <span class="sp"></span>
+            <span id="lines-sum" class="meta-sum"></span>
+          </div>
+
+          <div id="emoji-toolbar" class="emoji-toolbar">
+            <!-- タグは renderer.js が入れる -->
+          </div>
+
+          <div id="caption-wrapper" class="hidden">
+            <label for="caption-input" class="cap">説明文（Voice Design のみ）</label>
+            <textarea id="caption-input" placeholder="落ち着いた女性の声で" rows="2"></textarea>
+          </div>
+
+          <div class="action-bar">
+            <div class="selected-voice-display">
+              <span class="active-dot inactive"></span>
+              <span>参照ボイス: <strong id="current-voice-name">なし</strong></span>
+              <button id="clear-voice-btn" class="btn btn-ghost btn-sm hidden">外す</button>
+            </div>
+            <div id="generate-training-notice" class="note warn" style="display:none;">
+              LoRA 学習中です。GPU を学習が使っているため、完了するまで生成できません。
+            </div>
+            <!-- この画面で一番押すもの。横幅いっぱいに取って迷わせない -->
+            <button id="generate-btn" class="btn btn-primary btn-gen">
+              <svg class="i"><use href="#ic-gen"/></svg><span>生成</span>
+              <div class="spinner hidden" id="gen-spinner"></div>
+            </button>
+          </div>
+        </section>
+
+        <div class="rule"><i></i></div>
+
+        <!-- サンプリング。横に並ぶので一望できる -->
+        <section class="controls-panel card span-12">
+          <div class="controls-header card-hd">
+            <span class="cap">サンプリング</span>
+          </div>
+          <div class="params-grid samp">
+            <div class="param-group">
+              <label>ステップ数 <span class="en">steps</span><span class="v" id="val-steps">40</span></label>
+              <input type="range" id="param-steps" min="10" max="120" value="40">
+            </div>
+            <div class="param-group">
+              <label title="生成する尺そのものを変えます。小さいほど早口・短く、大きいほどゆっくり・長くなります。長い行や記号の多い行が途中で切れるときは上げてください。下げすぎると言い切る前に切れ、上げすぎると LoRA によっては語尾を捏造します。">話速 <span class="en">duration</span><span class="v" id="val-duration-scale">1.00</span> <span id="duration-scale-warn" class="warn-inline"></span></label>
+              <input type="range" id="param-duration-scale" min="0.4" max="1.5" step="0.05" value="1.0">
+            </div>
+            <div class="param-group">
+              <label>テキスト忠実度 <span class="en">Text CFG</span><span class="v" id="val-cfg-text">2.0</span></label>
+              <input type="range" id="param-cfg-text" min="0" max="10" step="0.1" value="2.0">
+            </div>
+            <div class="param-group">
+              <label>話者忠実度 <span class="en">Speaker CFG</span><span class="v" id="val-cfg-speaker">3.0</span></label>
+              <input type="range" id="param-cfg-speaker" min="0" max="10" step="0.1" value="3.0">
+            </div>
+            <div class="param-group">
+              <label>説明文忠実度 <span class="en">Caption CFG</span><span class="v" id="val-cfg-caption">4.0</span></label>
+              <input type="range" id="param-cfg-caption" min="0" max="10" step="0.1" value="4.0">
+            </div>
+            <div class="param-group">
+              <label>候補数 <span class="en">candidates</span><span class="v" id="val-candidates">1</span></label>
+              <input type="range" id="param-candidates" min="1" max="10" value="1">
+            </div>
+            <div class="param-group">
+              <label>シード <span class="en">seed</span></label>
+              <input type="number" id="param-seed" placeholder="空欄 = ランダム">
+            </div>
+          </div>
+        </section>
+
+        <div class="rule"><i></i></div>
+
+        <!-- 生成結果。状態を隣に置いて、走らせている間に VRAM が目に入るようにする -->
+        <section class="output-region card span-10">
+          <div class="card-hd">
+            <span class="cap">生成結果</span><span class="sp"></span>
+            <span id="synth-save-folder-path" class="meta" style="font-size:11px;">保存先: 未設定</span>
+            <button id="synth-save-folder-btn" class="btn btn-ghost btn-sm tip" data-tip="保存先" aria-label="保存先"><svg class="i i-sm"><use href="#ic-save"/></svg></button>
+            <button id="synth-save-folder-clear" class="btn btn-ghost btn-sm hidden">クリア</button>
+          </div>
+          <div id="result-container" class="result-panel">
+            <p class="note" id="placeholder-text">ここに生成した音声が出ます</p>
+            <!-- 生成した音声は renderer.js が入れる -->
+          </div>
+        </section>
+
+        <!-- 状態。値は renderer.js が入れる -->
+        <section class="card stat-card span-2">
+          <div class="card-hd"><span class="cap">状態</span></div>
+          <div class="card-body">
+            <div class="kv"><span>LoRA</span><b id="stat-lora">—</b></div>
+            <div class="kv"><span>参照ボイス</span><b id="stat-voices">—</b></div>
+            <div class="kv"><span>デバイス</span><b id="stat-device">—</b></div>
+          </div>
+        </section>
+
+      </div>
+      </div> <!-- /tab-pane synthesize -->
+
+      <!-- Train tab -->
+      <div class="tab-pane" data-tab="train">
+        <div class="work-full">
+
+          <!-- 実行中。走っている間に見るものなので先頭に置いて主役にする -->
+          <section class="card lift span-12" id="tr-active-section">
+            <div class="card-hd">
+              <span class="cap">実行中</span><span class="sp"></span>
+              <span id="tr-job-state-badge" class="meta" style="font-size:11px;"></span>
+            </div>
+
+            <div id="tr-no-active" class="run-empty">
+              <p class="empty-t">いま走っている学習はありません</p>
+              <p class="empty-d">下の「新しい学習」から始められます。</p>
+            </div>
+
+            <div id="tr-active-detail" class="run hidden">
+              <div class="run-top">
+                <span class="run-name" id="tr-job-name"></span>
+                <span class="run-ds" id="tr-job-dataset"></span>
+                <code class="run-id" id="tr-job-id"></code>
+                <span class="run-state"><span class="dot"></span><span id="tr-job-state-text">学習中</span></span>
+              </div>
+
+              <!-- 進捗。数字は棒の上に置いて、目を動かさず両方読めるようにする -->
+              <div class="prog-t">
+                <span>ステップ</span><b id="tr-job-step">—</b>
+                <span class="eta" id="tr-job-eta"></span>
+                <span class="pct" id="tr-job-pct"></span>
+              </div>
+              <div class="prog"><i id="tr-progress-bar"></i></div>
+
+              <!-- 損失。下がっているかだけ分かればよいので、数字と増減を並べる -->
+              <div class="loss-row">
+                <div class="loss">
+                  <span class="loss-k">Loss</span>
+                  <span class="loss-v" id="tr-job-loss">—</span>
+                </div>
+                <div class="loss">
+                  <span class="loss-k">Val Loss</span>
+                  <span class="loss-v" id="tr-job-val-loss">—</span>
+                </div>
+              </div>
+              <!-- 推移は API が履歴を返さないので、開いている間に貯めた分だけ描く -->
+              <canvas class="spark" id="tr-loss-spark"></canvas>
+
+              <div class="run-foot">
+                <button id="tr-test-lora-btn" class="btn btn-ghost btn-sm hidden"
+                        title="この LoRA を選んだ状態で生成タブを開きます"><svg class="i i-sm"><use href="#ic-play2"/></svg>この LoRA を試す</button>
+                <span class="sp"></span>
+                <button id="tr-stop-btn" class="btn btn-ghost btn-sm btn-danger hidden"><svg class="i i-sm"><use href="#ic-x"/></svg>停止</button>
+              </div>
+
+              <details>
+                <summary class="log-sum"><svg class="i i-sm chev"><use href="#ic-chev"/></svg>記録</summary>
+                <pre id="tr-job-log" class="log"></pre>
+              </details>
+            </div>
+          </section>
+
+          <div class="rule"><i></i></div>
+
+          <!-- 新しく始める -->
+          <section class="card span-12">
+            <div class="card-hd"><span class="cap">新しい学習</span></div>
+            <div class="cfg">
+              <div class="param-group">
+                <label for="tr-dataset">データセット</label>
+                <select id="tr-dataset"></select>
+              </div>
+              <div class="param-group">
+                <label for="tr-lora-name">できる LoRA の名前</label>
+                <input type="text" id="tr-lora-name" placeholder="空欄 = データセット名">
+              </div>
+              <div class="param-group">
+                <label for="tr-base">ベースモデル</label>
+                <select id="tr-base">
+                  <option value="v4_1">v4.1-Small（推奨）</option>
+                  <option value="v4">v4-Small</option>
+                  <option value="v3">v3</option>
+                  <option value="v2">v2</option>
+                  <option value="v3_voice_design">v3 Voice Design</option>
+                  <option value="voice_design">v2 Voice Design</option>
+                </select>
+              </div>
+              <div class="param-group">
+                <label for="tr-preset">学習範囲</label>
+                <select id="tr-preset">
+                  <option value="speaker_style" selected>話者＋話し方（参照音声なしで話者固定）</option>
+                  <option value="full">全体（独自の固有名詞・読みも学習）</option>
+                  <option value="speaker_only">話者のみ（軽量）</option>
+                  <option value="style_only">話し方のみ（参照音声と併用）</option>
+                </select>
+              </div>
+              <div class="param-group">
+                <label for="tr-max-steps">ステップ数</label>
+                <input type="number" id="tr-max-steps" value="2000" min="10" step="100">
+              </div>
+              <div class="param-group">
+                <label for="tr-save-every">何ステップごとに保存</label>
+                <input type="number" id="tr-save-every" value="500" min="10" step="100">
+              </div>
+
+              <div class="wide">
+                <details class="more">
+                  <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>細かい設定（VRAM・学習率）</summary>
+                  <div class="more-body cfg" style="padding:10px 0 0;">
+                    <div class="param-group">
+                      <label for="tr-batch-size">バッチサイズ</label>
+                      <input type="number" id="tr-batch-size" value="4" min="1">
+                    </div>
+                    <div class="param-group">
+                      <label for="tr-grad-accum">勾配の蓄積</label>
+                      <input type="number" id="tr-grad-accum" value="8" min="1">
+                    </div>
+                    <div class="param-group wide">
+                      <label for="tr-lr">学習率</label>
+                      <input type="text" id="tr-lr" placeholder="空欄 = 既定（1e-4）">
+                    </div>
+                  </div>
+                </details>
+              </div>
+            </div>
+
+            <div id="tr-rocm-notice" class="warn-inline" style="display:none">
+              AMD (Radeon) は Windows での学習に対応していません。学習には
+              NVIDIA の GPU か、WSL2 上の Linux 環境が必要です。生成は動きます。
+            </div>
+
+            <div class="act-row">
+              <button id="tr-start-btn" class="btn btn-primary"><svg class="i i-sm"><use href="#ic-spark"/></svg>学習を始める</button>
+              <button id="tr-auto-setting-btn" class="btn btn-ghost btn-sm"
+                      title="データセットを分析して ステップ数 / 保存間隔 / 学習範囲に推奨値を入れます（学習は開始しません）">おまかせ設定</button>
+              <span id="tr-start-status" class="note"></span>
+            </div>
+          </section>
+
+          <div class="rule"><i></i></div>
+
+          <!-- チェックポイント試聴 -->
+          <section class="card span-12">
+            <div class="card-hd">
+              <span class="cap">チェックポイント試聴</span><span class="sp"></span>
+              <button id="tr-test-reload" class="btn btn-ghost btn-sm tip" data-tip="再読込" aria-label="再読込"><svg class="i i-sm"><use href="#ic-refresh"/></svg></button>
+            </div>
+            <div class="cfg">
+              <div class="param-group">
+                <label for="tr-test-job">学習記録</label>
+                <select id="tr-test-job"></select>
+              </div>
+              <div class="param-group">
+                <label for="tr-test-ckpt">チェックポイント</label>
+                <select id="tr-test-ckpt"></select>
+              </div>
+              <div class="param-group wide">
+                <label for="tr-test-text">テキスト</label>
+                <input type="text" id="tr-test-text" value="こんにちは。これは音声合成のテストです。">
+              </div>
+            </div>
+            <div class="act-row">
+              <button id="tr-test-gen" class="btn btn-primary btn-sm"><svg class="i i-sm"><use href="#ic-gen"/></svg>生成して聴く</button>
+              <input type="text" id="tr-test-regname" placeholder="登録名（空欄 = 学習名）" style="min-width:180px;">
+              <button id="tr-test-register" class="btn btn-ghost btn-sm"><svg class="i i-sm"><use href="#ic-save"/></svg>この回を採用して登録</button>
+              <button id="tr-test-purge-others" class="btn btn-ghost btn-sm"
+                      title="採用した回だけ残して、この学習記録の他の世代を削除します">採用以外を削除</button>
+              <button id="tr-test-purge-one" class="btn btn-ghost btn-sm"
+                      title="いま選んでいるチェックポイントだけを削除します">この回を削除</button>
+              <span id="tr-test-status" class="note"></span>
+            </div>
+            <div id="tr-test-results" class="test-results"></div>
+          </section>
+
+          <div class="rule"><i></i></div>
+
+          <!-- 履歴 -->
+          <section class="card span-12">
+            <div class="card-hd">
+              <span class="cap">履歴</span><span class="sp"></span>
+              <span id="tr-jobs-sum" class="meta" style="font-size:11px;"></span>
+              <button id="tr-refresh-jobs" class="btn btn-ghost btn-sm tip" data-tip="再読込" aria-label="再読込"><svg class="i i-sm"><use href="#ic-refresh"/></svg></button>
+            </div>
+            <table class="jobs" id="tr-jobs-table">
+              <thead><tr>
+                <th class="j-name">名前</th><th>状態</th><th class="num">ステップ</th>
+                <th class="num">Loss</th><th class="num">Val Loss</th><th>採用</th><th>作成</th>
+              </tr></thead>
+              <tbody id="tr-jobs-body"></tbody>
+            </table>
+            <p id="tr-jobs-empty" class="note hidden" style="padding:14px;">まだ学習の記録がありません。</p>
+          </section>
+
+        </div>
+      </div>
+
+      <!-- Dataset tab -->
+      <div class="tab-pane" data-tab="dataset">
+        <div class="work-full">
+
+          <!-- 新しく作る -->
+          <section class="card lift span-12">
+            <div class="card-hd"><span class="cap">新しく作る</span></div>
+
+            <!-- 工程1：音源を足す -->
+            <div class="step">
+              <div class="step-hd">
+                <span class="step-no">1</span><span class="step-t">音源を足す</span>
+                <span class="step-note">wav / ogg</span>
+              </div>
+              <div id="ds-drop-zone" class="drop">
+                <p>ここにファイルかフォルダを落とす</p>
+                <div class="row">
+                  <button id="ds-browse-btn" class="btn btn-ghost btn-sm"><svg class="i i-sm"><use href="#ic-folder"/></svg>ファイルを選ぶ</button>
+                  <button id="ds-browse-folder-btn" class="btn btn-ghost btn-sm"><svg class="i i-sm"><use href="#ic-folder"/></svg>フォルダを選ぶ</button>
+                </div>
+              </div>
+              <div id="ds-sources" class="src-list"></div>
+            </div>
+
+            <!-- 工程2：分割して書き起こす -->
+            <div class="step">
+              <div class="step-hd">
+                <span class="step-no">2</span><span class="step-t">分割して書き起こす</span>
+              </div>
+              <div class="opt-row">
+                <label class="chk" title="1 ファイル＝1 セリフの素材（ゲーム音声など）のときに使う。無音検出を飛ばす。">
+                  <input type="checkbox" id="ds-skip-split"> 分割しない（1 ファイル＝1 クリップ）
+                </label>
+                <span id="ds-vad-controls" class="opt-row">
+                  <span class="num-f">最短 <input type="number" id="ds-min-sec" value="3" step="0.5"><span class="u">秒</span></span>
+                  <span class="num-f">最長 <input type="number" id="ds-max-sec" value="20" step="1"><span class="u">秒</span></span>
+                </span>
+                <span class="sp"></span>
+                <button id="ds-process-btn" class="btn btn-primary btn-sm"><svg class="i i-sm"><use href="#ic-gen"/></svg>実行</button>
+              </div>
+              <p id="ds-process-status" class="note"></p>
+            </div>
+
+            <!-- 工程3：確かめて直す -->
+            <div class="step">
+              <div class="step-hd">
+                <span class="step-no">3</span><span class="step-t">確かめて直す</span>
+                <span class="step-note">書き起こしはその場で直せます</span>
+                <span class="num-f" style="margin-left:12px;">
+                  <svg class="i i-sm"><use href="#ic-speaker"/></svg>
+                  音量 <input type="range" id="ds-vol" min="0" max="100" step="5" value="100" style="width:88px;">
+                  <span class="u" id="ds-vol-val">100</span>
+                </span>
+              </div>
+              <table id="ds-clips-table" class="clips">
+                <thead>
+                  <tr><th class="c-no">#</th><th class="c-dur">長さ</th><th class="c-txt">書き起こし</th>
+                      <th class="c-aud">音</th><th class="c-use">使う</th></tr>
+                </thead>
+                <tbody id="ds-clips-body"></tbody>
+              </table>
+              <p id="ds-clips-empty" class="note">まだクリップがありません。先に音源を分割してください。</p>
+              <div id="ds-clips-stats" class="stats"></div>
+            </div>
+
+            <!-- 工程4：名前を付けて保存 -->
+            <div class="step">
+              <div class="step-hd">
+                <span class="step-no">4</span><span class="step-t">名前を付けて保存</span>
+              </div>
+              <div class="save-row">
+                <input type="text" id="ds-save-name" placeholder="データセット名（例: Marin）">
+                <button id="ds-save-btn" class="btn btn-primary" disabled><svg class="i i-sm"><use href="#ic-save"/></svg>保存</button>
+              </div>
+              <div class="path-row">
+                <button id="ds-target-pick" class="btn btn-ghost btn-sm"><svg class="i i-sm"><use href="#ic-folder"/></svg>保存先</button>
+                <span id="ds-target-path" class="p">既定（アプリのデータ領域）</span>
+                <button id="ds-target-reset" class="btn btn-ghost btn-sm hidden">戻す</button>
+              </div>
+              <p id="ds-save-status" class="note"></p>
+            </div>
+          </section>
+
+          <div class="rule"><i></i></div>
+
+          <!-- 既存のデータセット -->
+          <section class="card span-12">
+            <div class="card-hd">
+              <span class="cap">データセット</span><span class="sp"></span>
+              <span id="ds-list-sum" class="meta" style="font-size:11px;"></span>
+              <button id="ds-refresh-btn" class="btn btn-ghost btn-sm tip" data-tip="再読込" aria-label="再読込"><svg class="i i-sm"><use href="#ic-refresh"/></svg></button>
+            </div>
+            <div id="ds-list"></div>
+            <p id="ds-list-empty" class="note hidden" style="padding:14px;">まだデータセットがありません。</p>
+          </section>
+
+        </div>
+      </div>
+  <!-- 朗読タブ -->
+  <div class="tab-pane" data-tab="narrate">
+    <div class="narr">
+
+      <div class="narr-main">
+
+        <!-- 操作帯。読んでいる間ずっと目に入るので額装して独立させる -->
+        <section class="card lift ctrl">
+          <div class="ctrl-file">
+            <button id="narrate-open-btn" class="btn btn-ghost btn-sm tip" data-tip="ファイルを開く" aria-label="ファイルを開く"><svg class="i i-sm"><use href="#ic-folder"/></svg></button>
+            <input type="text" id="narrate-file-path" placeholder="ファイルパスを入力 または フォルダの印から選ぶ">
+            <span id="narrate-chunk-info" class="meta"></span>
+          </div>
+
+          <div class="ctrl-play">
+            <button id="narrate-prev-btn" class="pbtn tip" data-tip="前の行" aria-label="前の行"><svg class="i i-sm"><use href="#ic-prev"/></svg></button>
+            <!-- 再生中は renderer.js が #ic-pause へ差し替える -->
+            <button id="narrate-play-btn" class="pbtn main tip" data-tip="読み上げる" aria-label="読み上げる"><svg class="i i-sm"><use href="#ic-play2"/></svg></button>
+            <button id="narrate-stop-btn" class="pbtn tip" data-tip="停止" aria-label="停止"><svg class="i i-sm"><use href="#ic-stop"/></svg></button>
+            <button id="narrate-next-btn" class="pbtn tip" data-tip="次の行" aria-label="次の行"><svg class="i i-sm"><use href="#ic-next"/></svg></button>
+
+            <div class="pos">
+              <div class="pos-bar"><i id="narrate-progress-bar"></i></div>
+              <div class="pos-t">
+                <span id="narrate-pos-text"></span>
+                <span id="narrate-status" class="st">停止中</span>
+              </div>
+            </div>
+
+            <button id="narrate-bookmark-btn" class="pbtn tip" data-tip="しおりを挟む" aria-label="しおりを挟む"><svg class="i i-sm"><use href="#ic-mark"/></svg></button>
+          </div>
+        </section>
+
+        <!-- 本文。縦の残りを全部もらう -->
+        <section class="card text-card">
+          <div class="card-hd">
+            <span class="cap">本文</span><span class="sp"></span>
+            <span id="narrate-resume-text" class="meta" style="font-size:11px;"></span>
+            <button id="narrate-resume-btn" class="btn btn-ghost btn-sm hidden">前回の位置から再開</button>
+          </div>
+          <div id="narrate-text-display" class="text">
+            <div class="text-empty"><p>テキストファイルを開くと表示されます</p></div>
+          </div>
+        </section>
+
+      </div>
+
+      <!-- 右の柱。設定はここへ畳む -->
+      <aside class="narr-side">
+        <div class="from">
+          <svg class="i i-sm"><use href="#ic-speaker"/></svg>
+          <span>声・モデル・LoRA は <b>生成タブ</b>の設定をそのまま使います。<br>
+                読ませる前に生成タブで選んでください。</span>
+        </div>
+
+        <div class="grp">
+          <details class="more" open>
+            <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>間（ま）と速さ</summary>
+            <div class="more-body">
+              <div class="param-group">
+                <label class="chk-line" title="鉤括弧などで始まらない行を地の文と見なし、その先頭にナレーション注釈 📖 を付けて生成します。セリフ行には付きません。注釈は尺の予測にも影響するため、付けると長さが少し変わります。">
+                  <input type="checkbox" id="narrate-emoji"> 地の文に 📖 を付ける<span class="v" id="narrate-emoji-note"></span>
+                </label>
+              </div>
+              <div class="param-group">
+                <label for="narrate-gap">間の倍率<span class="v" id="narrate-gap-val">1.0</span></label>
+                <input type="range" id="narrate-gap" min="0.5" max="4.0" step="0.1" value="1.0">
+              </div>
+              <div class="param-group">
+                <label for="narrate-rate" title="生成する尺そのものを変えます。小さいほど早口・短く、大きいほどゆっくり・長くなります。長い行や記号の多い行が途中で切れるときは上げてください。鳴っている行は最後まで流れ、次の行から新しい速さで作り直します。">読む速さ <span class="en">duration</span><span class="v" id="narrate-rate-val">1.00</span></label>
+                <input type="range" id="narrate-rate" min="0.4" max="1.5" step="0.05" value="1.0">
+              </div>
+              <div class="param-group">
+                <label for="narrate-vol">音量<span class="v" id="narrate-vol-val">100</span></label>
+                <input type="range" id="narrate-vol" min="0" max="100" step="5" value="100">
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <div class="grp">
+          <details class="more">
+            <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>先読み</summary>
+            <div class="more-body">
+              <div class="param-group">
+                <label for="narrate-prefetch">先読み<span class="v" id="narrate-prefetch-val">1</span></label>
+                <input type="range" id="narrate-prefetch" min="1" max="10" step="1" value="1">
+              </div>
+              <p class="note">増やすと行の切り替わりで待たされにくくなります（生成が遅い環境向け）。</p>
+            </div>
+          </details>
+        </div>
+
+        <div class="grp">
+          <details class="more">
+            <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>サンプリング</summary>
+            <div class="more-body">
+              <div class="param-group">
+                <label for="narrate-steps">ステップ数<span class="v" id="narrate-steps-val">30</span></label>
+                <input type="range" id="narrate-steps" min="5" max="50" value="30">
+              </div>
+              <div class="param-group">
+                <label for="narrate-cfg-text">テキスト忠実度<span class="v" id="narrate-cfg-text-val">2.0</span></label>
+                <input type="range" id="narrate-cfg-text" min="0" max="10" step="0.5" value="2.0">
+              </div>
+              <div class="param-group">
+                <label for="narrate-cfg-spk">話者忠実度<span class="v" id="narrate-cfg-spk-val">3.0</span></label>
+                <input type="range" id="narrate-cfg-spk" min="0" max="10" step="0.5" value="3.0">
+              </div>
+            </div>
+          </details>
+        </div>
+
+        <div class="grp">
+          <details class="more">
+            <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>地の文の声</summary>
+            <div class="more-body">
+              <label class="chk-line"><input type="checkbox" id="narrate-selfref" checked> 地の文の声を安定させる</label>
+              <p class="note">LoRA で一度合成し、その声を地の文の話者に固定します。</p>
+              <div class="param-group">
+                <label for="narrate-selfref-seed">種になるセリフ</label>
+                <textarea id="narrate-selfref-seed" rows="2"></textarea>
+              </div>
+            </div>
+          </details>
+        </div>
+      </aside>
+
+    </div>
+  </div>
+
+  <!-- 青空文庫タブ -->
+  <div class="tab-pane" data-tab="aozora">
+    <div class="work-full">
+
+      <!-- 探す -->
+      <section class="card lift span-12">
+        <div class="card-hd"><span class="cap">探す</span></div>
+        <div class="find">
+          <div class="find-row">
+            <input type="text" id="aoz-title" placeholder="作品名（部分一致）">
+            <input type="text" id="aoz-author" placeholder="著者名（部分一致）">
+            <button id="aoz-search-btn" class="btn btn-primary"><svg class="i i-sm"><use href="#ic-search"/></svg>探す</button>
+          </div>
+
+          <div class="by-url">
+            <div class="find-row">
+              <input type="text" id="aoz-url" placeholder="図書カードの URL（例: https://www.aozora.gr.jp/cards/000148/card789.html）">
+              <button id="aoz-url-btn" class="btn btn-ghost btn-sm">開く</button>
+            </div>
+          </div>
+
+          <div class="find-foot">
+            <span id="aoz-status" class="grab-t"></span>
+            <span class="sp"></span>
+            <span class="note">※著作権切れ作品のみ。個人利用のみ・再配布なし。</span>
+          </div>
+        </div>
+      </section>
+
+      <div class="rule"><i></i></div>
+
+      <!-- 見つかったもの -->
+      <section class="card span-12">
+        <div class="card-hd">
+          <span class="cap">見つかったもの</span><span class="sp"></span>
+          <span id="aoz-results-sum" class="meta" style="font-size:11px;"></span>
+        </div>
+        <div id="aoz-results" class="hits"></div>
+      </section>
+
+      <div class="rule"><i></i></div>
+
+      <!-- 選んだもの -->
+      <section class="card span-12">
+        <div class="card-hd"><span class="cap">選んだもの</span></div>
+        <div id="aoz-detail"></div>
+      </section>
+
+    </div>
+  </div>
+
+  <!-- LoRAマージタブ -->
+  <div class="tab-pane" data-tab="loramix">
+    <div class="work-full">
+
+      <!-- 混ぜるもの -->
+      <section class="card lift span-12">
+        <div class="card-hd">
+          <span class="cap">混ぜる LoRA</span><span class="sp"></span>
+          <span class="meta" style="font-size:11px;">同じベースモデルどうしのみ</span>
+        </div>
+        <div class="mix">
+          <!-- スロットは renderer.js が入れる -->
+          <div id="loramix-slots"></div>
+
+          <!-- 合計は必ず 100%。ひとつ動かすと他が押し出される -->
+          <div id="loramix-bar" class="mixbar"></div>
+          <div id="loramix-key" class="mixkey"></div>
+
+          <div class="slot-foot">
+            <button id="loramix-add-btn" class="btn btn-ghost btn-sm"><svg class="i i-sm"><use href="#ic-plus"/></svg>LoRA を足す（最大 3）</button>
+          </div>
+        </div>
+      </section>
+
+      <div class="rule"><i></i></div>
+
+      <!-- 出力 -->
+      <section class="card span-12">
+        <div class="card-hd"><span class="cap">作るもの</span></div>
+        <div class="out">
+          <div class="param-group">
+            <label for="loramix-method">混ぜ方</label>
+            <select id="loramix-method">
+              <option value="linear">Linear（線形補間）</option>
+              <option value="slerp">SLERP（球面補間・2 つのときだけ）</option>
+            </select>
+          </div>
+          <div class="param-group">
+            <label for="loramix-name">新しい LoRA の名前</label>
+            <input type="text" id="loramix-name" placeholder="例: mix-a-b">
+          </div>
+          <div class="param-group wide">
+            <label for="loramix-notes">メモ</label>
+            <input type="text" id="loramix-notes" placeholder="どの LoRA を何 % 混ぜたかなど（任意）">
+          </div>
+        </div>
+        <div class="run-row">
+          <button id="loramix-run-btn" class="btn btn-primary"><svg class="i i-sm"><use href="#ic-merge"/></svg>マージする</button>
+          <span id="loramix-status" class="note"></span>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <!-- 辞書タブ -->
+  <div class="tab-pane" data-tab="dict">
+    <div class="work-full">
+
+      <!-- 追加 -->
+      <section class="card lift dict-w">
+        <div class="card-hd">
+          <span class="cap">読みを登録する</span><span class="sp"></span>
+          <span class="meta" style="font-size:11px;">合成時に読みへ置き換わります</span>
+        </div>
+        <div class="add">
+          <span class="w"><input type="text" id="narrate-dict-word" placeholder="表記（漢字・語句）"></span>
+          <span class="arrow">→</span>
+          <span class="w"><input type="text" id="narrate-dict-yomi" placeholder="読み"></span>
+          <span class="memo"><input type="text" id="narrate-dict-memo" placeholder="メモ（任意）"></span>
+          <button id="narrate-dict-add" class="btn btn-primary"><svg class="i i-sm"><use href="#ic-plus"/></svg>追加</button>
+        </div>
+        <p class="note eg">例: <code>汐入</code> → <code>シオイリ</code> ／ <code>女将</code> → <code>オカミ</code></p>
+      </section>
+
+      <div class="rule"><i></i></div>
+
+      <!-- 登録済み -->
+      <section class="card dict-w">
+        <div class="card-hd">
+          <span class="cap">登録済み</span><span class="sp"></span>
+          <span class="meta" style="font-size:11px;"><b id="narrate-dict-count">0</b> 件</span>
+        </div>
+        <table class="dict">
+          <thead><tr>
+            <th class="d-w">表記</th><th class="d-y">読み</th><th class="d-m">メモ</th><th class="d-x"></th>
+          </tr></thead>
+          <tbody id="narrate-dict-body"></tbody>
+        </table>
+        <p id="narrate-dict-empty" class="dict-empty">まだ登録がありません。</p>
+      </section>
+
+      <div class="rule"><i></i></div>
+
+      <!-- 使い方。毎回は読まないので畳んで最後に置く -->
+      <section class="card dict-w">
+        <div class="card-hd"><span class="cap">使い方</span></div>
+        <div class="how">
+          <details class="more">
+            <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>読みが置き換わる仕組み</summary>
+            <div class="how-body">
+              <p>誤って読まれる語を「表記 → 読み」で登録すると、
+                 <b>朗読と生成の両方</b>で、合成するときだけ読みに置き換えます。
+                 画面に出ている文章は元のままです。</p>
+              <p>同じ漢字で読みが変わる語（額＝ガク／ヒタイ）は、
+                 <b>前後を含む語句</b>で登録します。
+                 <code>額に汗</code> → <code>ヒタイにあせ</code>、
+                 <code>全額</code> → <code>ゼンガク</code>。
+                 表記の長いほうが先に当たります。</p>
+              <p>読みは<b>置き換えたい部分だけ</b>で構いません。
+                 送り仮名はそのまま残せます（<code>額に汗</code> → <code>ヒタイにあせ</code>）。
+                 表記の決まりはなく、そのまま合成に渡ります。</p>
+              <p>メモは整理のためのもので、合成には影響しません。</p>
+            </div>
+          </details>
+        </div>
+      </section>
+
+    </div>
+  </div>
+
+  <!-- LoRA 管理モーダル -->
+  <div id="lora-modal" class="veil hidden">
+    <div class="sheet">
+
+      <div class="sheet-hd">
+        <span class="cap">LoRA を管理</span><span class="sp"></span>
+        <span id="lora-count" class="meta" style="font-size:11px;"></span>
+        <button id="lora-modal-close" class="sheet-x tip" data-tip="閉じる" aria-label="閉じる"><svg class="i i-sm"><use href="#ic-x"/></svg></button>
+      </div>
+
+      <div class="sheet-body">
+        <!-- 絞り込み。181 体あるので、名前で絞るのが主。
+             ベースの押しボタンは「在るものだけ」を renderer.js が入れる。 -->
+        <div class="filt">
+          <span class="q"><input type="text" id="lora-filter" placeholder="名前で探す"></span>
+          <div id="lora-base-seg" class="seg"></div>
+        </div>
+
+        <!-- 一覧。中身は renderer.js が入れる -->
+        <div id="lora-list-body" class="rows"></div>
+        <p id="lora-list-empty" class="rows-empty">まだ LoRA がありません。</p>
+      </div>
+
+      <!-- 取り込み。開くのは新規登録のときだけなので畳んでおく -->
+      <div class="imp">
+        <details>
+          <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>外から取り込む</summary>
+          <div class="imp-body">
+            <div class="param-group">
+              <label for="lora-import-name">名前</label>
+              <input type="text" id="lora-import-name" placeholder="例: my-voice-v4">
+            </div>
+            <div class="param-group">
+              <label for="lora-import-base">ベースモデル</label>
+              <select id="lora-import-base">
+                <option value="v4_1">v4.1-Small（推奨）</option>
+                <option value="v4">v4-Small</option>
+                <option value="v3">v3</option>
+                <option value="v2">v2</option>
+                <option value="v3_voice_design">v3 Voice Design</option>
+                <option value="voice_design">v2 Voice Design</option>
+              </select>
+            </div>
+            <div class="param-group wide">
+              <label for="lora-import-notes">メモ</label>
+              <input type="text" id="lora-import-notes" placeholder="どこで作ったか・何ステップかなど（任意）">
+            </div>
+            <div class="param-group wide">
+              <label>置き場所</label>
+              <div class="pickrow">
+                <button id="lora-import-pick" class="btn btn-ghost btn-sm"><svg class="i i-sm"><use href="#ic-folder"/></svg>フォルダを選ぶ</button>
+                <span id="lora-import-path" class="p">選ばれていません</span>
+              </div>
+            </div>
+          </div>
+          <div class="imp-foot">
+            <button id="lora-import-submit" class="btn btn-primary"><svg class="i i-sm"><use href="#ic-plus"/></svg>取り込む</button>
+            <span class="note">adapter_config.json のあるフォルダを選んでください。</span>
+          </div>
+        </details>
+      </div>
+
+    </div>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>

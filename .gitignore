@@ -1,0 +1,51 @@
+# --- 環境（PC ごとに作り直すもの） ---
+.venv/
+.venv_old_*/
+APP/node_modules/
+__pycache__/
+*.pyc
+
+# --- 生成物・個人資産（サイズが大きく、コードではない） ---
+# LoRA は 1体118MB あり GitHub の 100MB 制限を超える。Google ドライブで管理する。
+APP/loras/
+APP/datasets/
+APP/lora_jobs/
+APP/voices/
+APP/outputs/
+APP/novels/
+gradio_outputs/
+gradio_outputs_voicedesign/
+
+# 学習用データ（tts_work を配下へ移設したのでこちらも除外する）。
+# datasets は音声・latent で数十GB、train_* は学習途中のチェックポイント。
+tts_work/datasets/
+tts_work/scripts/train_*/
+
+# 編集前の控え（どの階層に作られても追跡しない）
+*.bak
+*.bak2
+*.premove
+
+# 起動時に自動生成される音声インデックス
+APP/metadata.json
+
+# 差し替え時の控え
+APP/_backup_*/
+
+# --- OS・エディタ ---
+Thumbs.db
+desktop.ini
+.DS_Store
+.vscode/
+.idea/
+
+# Windows ショートカットは作成した PC のパスとボリューム情報を持つので、
+# 別 PC では機能しない。
+*.lnk
+
+# ID 照合に使う作業ファイル（成果物ではない）
+APP/_ids.txt
+
+# --- setup.bat が取得するモデル（HF_HOME）---
+# 約12GB。再取得できるので追跡しない。
+/models/

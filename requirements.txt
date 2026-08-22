@@ -1,0 +1,27 @@
+dacvae @ git+https://github.com/facebookresearch/dacvae
+datasets>=3.0.0
+gradio>=5.0.0
+huggingface-hub>=0.34.0
+llvmlite>=0.40.0
+numba>=0.57.0
+peft>=0.18.0
+pyyaml>=6.0
+safetensors>=0.7.0
+soundfile>=0.12.0
+# 上流は <0.2 で切っているが、この上限だけが Python 3.12 を塞いでいる。
+# 0.1.99 の Windows wheel は cp311 までで、3.12 ではソースビルドに落ちて
+# cmake で失敗する。0.2.0 には cp312 の wheel がある。
+# 実測では sentencepiece は生成にも学習にも要らない（transformers 5 では
+# extra 扱い。v3/v4 のトークナイザは tokenizer.json を読む TokenizersBackend
+# で、import を遮断しても生成・トークナイズとも通る）。
+# Radeon 版 PyTorch は Windows では cp312 のみの配布なので、上限を外して
+# 3.12 を選べるようにする。
+sentencepiece>=0.1.99
+silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152
+torch>=2.10.0
+torchaudio>=2.10.0
+torchcodec>=0.10.0,<0.11.0
+torchdata>=0.11.0
+transformers>=5.12.1,<6
+tqdm>=4.67.3
+wandb>=0.17.0
