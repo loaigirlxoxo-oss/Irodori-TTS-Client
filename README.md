@@ -38,12 +38,6 @@ Radeon は試験対応です。生成は動く見込みですが、AMD は Windo
 
 詳細は [はじめにお読みください.md](はじめにお読みください.md) を参照してください。
 
-**更新するとき**
-
-以前の版は v4 を別の Python 環境で動かしていました。いまはひとつに統合されて
-いるので、`Irodori-TTS-v4\` フォルダ（約 5GB）は使われません。残っていれば
-削除して構いません。`setup.bat` は触らないので、消さない限り残り続けます。
-
 ---
 
 ## タブ
@@ -86,23 +80,6 @@ Radeon は試験対応です。生成は動く見込みですが、AMD は Windo
 - Linux / macOS。`setup.bat` と `起動.bat` は Windows 専用です
 
 確認した環境は Windows / RTX 5080 (16GB) と RTX 3080 の2構成です。それ以外では確認していません。
-
----
-
-## 構成
-
-```
-APP/                  Electron アプリ本体（main.js / renderer.js / server*.py）
-irodori_tts/          推論・学習ランタイム（上流 main。v2/v3/v4/VoiceDesign 共通）
-configs/ docs/        設定とドキュメント
-setup.bat 起動.bat    セットアップと起動
-```
-
-以前は v4 だけ別ツリー・別 Python 環境に置き、サブプロセスで呼んでいました。
-上流の `main` が v2/v3/VoiceDesign のチェックポイントと後方互換になったので、
-ひとつのツリーに統合し、v4 も同じランタイムで直接読むようにしています。
-
-データは `APP/` 配下（`voices` `loras` `datasets` `outputs` など）に置かれ、フォルダごと移動できます。
 
 ---
 
