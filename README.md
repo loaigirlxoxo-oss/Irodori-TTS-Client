@@ -10,6 +10,20 @@
 
 ## 導入
 
+**入手する**
+
+緑の **Code** ボタンから **Download ZIP** を選び、好きな場所に展開します。
+[Releases](https://github.com/loaigirlxoxo-oss/Irodori-TTS-Client/releases) からも同じものを取得できます。
+
+Git を使う場合は次のようにします。
+
+```
+git clone https://github.com/loaigirlxoxo-oss/Irodori-TTS-Client.git
+```
+
+展開して置くだけです。この時点ではまだ動きません。下記の必要なものを揃えてから、
+`setup.bat` を実行してください。環境とモデルはそこで取得されます。
+
 **必要なもの**
 
 | 項目 | 条件 |
