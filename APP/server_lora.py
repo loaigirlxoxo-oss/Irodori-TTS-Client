@@ -37,7 +37,7 @@ from data_paths import loras_dir, datasets_dir, voices_metadata_path  # noqa: E4
 
 router = APIRouter()
 
-ALLOWED_BASES = ("v4_1", "v4", "v3", "v3_voice_design", "v2", "voice_design")
+ALLOWED_BASES = ("v4_1", "v4_1_anime", "v4", "v3", "v3_voice_design", "v2", "voice_design")
 META_NAME = "meta.json"
 ADAPTER_SUBDIR = "adapter"
 # Train タブの試聴が使い回す一時登録。生成 API は登録名しか受け取らないので

@@ -57,7 +57,7 @@ const isVoiceDesignModel = m => VOICE_DESIGN_MODELS.includes(String(m));
 
 // v4 系（v4-Small と v4.1-Small）。v4.1 は duration predictor だけを
 // 差し替えたもので、条件づけの作りは v4 と同じ。
-const V4_MODELS = ['v4', 'v4_1'];
+const V4_MODELS = ['v4', 'v4_1', 'v4_1_anime'];
 const isV4Model = m => V4_MODELS.includes(String(m));
 
 const NARRATION_EMOJI = '📖';
@@ -1504,9 +1504,17 @@ function updateLoraVoiceHint() {
   hint.style.display = msg ? '' : 'none';
 }
 
+// 重みが違うだけで構造が同じベースは、LoRA を互いに当てられる。
+// v4.1-Anime は v4.1-Small の追加学習で、safetensors のキーと形状が
+// 完全に一致する（実測）。判定規則はサーバー側 is_lora_compatible と対。
+const BASE_ALIASES = [['v4_1', 'v4_1_anime']];
+const isLoraCompatible = (loraBase, model) =>
+  loraBase === model ||
+  BASE_ALIASES.some(g => g.includes(loraBase) && g.includes(model));
+
 function refreshLoraDropdown() {
   const base = modelSelect.value;
-  const compatible = loraRegistry.filter(l => l.base === base);
+  const compatible = loraRegistry.filter(l => isLoraCompatible(l.base, base));
 
   loraSelect.innerHTML = '';
   if (compatible.length === 0) {
@@ -1565,6 +1573,7 @@ function applyCondModeUI() {
 // 見た目の色（cls）は世代で揃える。v4.1 は v4 と同じ扱い。
 const LORA_BASES = {
   v4_1:            { cls: 'v4', label: 'v4.1', tip: 'v4.1-Small' },
+  v4_1_anime:      { cls: 'v4', label: 'アニメ', tip: 'v4.1-Anime (phasefield-audio)' },
   v4:              { cls: 'v4', label: 'v4',   tip: 'v4-Small' },
   v3:              { cls: 'v3', label: 'v3',   tip: 'v3' },
   v3_voice_design: { cls: 'vd', label: 'VD3',  tip: 'v3 Voice Design (600M)' },

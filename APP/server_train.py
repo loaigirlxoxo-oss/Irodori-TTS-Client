@@ -39,6 +39,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.append(str(_PROJECT_ROOT))
 
 from data_paths import lora_jobs_dir, loras_dir  # noqa: E402
+from data_paths import manual_checkpoint, OPTIONAL_MODELS, missing_optional_model_message
 from huggingface_hub import hf_hub_download  # noqa: E402
 from server_dataset import get_dataset_dir  # noqa: E402  honors external-location registry
 
@@ -52,6 +53,11 @@ BASE_CONFIGS: dict[str, dict[str, str]] = {
     # 本体は同じ。上流に v4.1 専用の学習 config は無いので v4 のものを使う。
     "v4_1": {
         "repo_id": "Aratako/Irodori-TTS-v4.1-Small",
+        "config_file": "configs/train_v4_small_lora.yaml",
+    },
+    # v4.1-Small の追加学習モデル。本体の作りは同じなので config も同じ。
+    "v4_1_anime": {
+        "repo_id": "phasefield-audio/Irodori-TTS-v4.1-Anime",
         "config_file": "configs/train_v4_small_lora.yaml",
     },
     "v4": {
@@ -894,11 +900,25 @@ def _run_job(job_id: str, params: dict) -> None:
         # setup.bat がモデルを先に取得しておくのもこのため。
         base = params["base"]
         base_cfg = BASE_CONFIGS[base]
-        log(f"[job] resolving base checkpoint: {base_cfg['repo_id']}")
-        log("[job] (a first-time download cannot be interrupted; stop takes effect after it)")
-        init_ckpt = Path(hf_hub_download(
-            repo_id=base_cfg["repo_id"], filename="model.safetensors"
-        ))
+        repo_id = base_cfg["repo_id"]
+        log(f"[job] resolving base checkpoint: {repo_id}")
+        # 任意モデル（setup.bat が取らないもの）は手で置いた実体だけを見る。
+        # 無いときに落としに行くと、生成側は「置いてください」と言うのに学習
+        # だけが 2.9GB を勝手に取り始める。しかも初回ダウンロードは停止要求を
+        # 受け付けないので、始まると止められない。
+        manual = manual_checkpoint(repo_id)
+        if manual is not None:
+            init_ckpt = Path(manual)
+            log("[job] using a manually placed checkpoint")
+        elif repo_id in OPTIONAL_MODELS:
+            raise RuntimeError(missing_optional_model_message(repo_id))
+        else:
+            # 警告は実際に取りに行くときだけ出す。出さないと、落とさない経路でも
+            # 「止められない」と読めてしまう。
+            log("[job] (a first-time download cannot be interrupted; stop takes effect after it)")
+            init_ckpt = Path(hf_hub_download(
+                repo_id=repo_id, filename="model.safetensors"
+            ))
         _abort_if_stopped("after checkpoint download")
 
         # 上流 main へ統合したので、v4 も v2/v3 と同じツリー・同じ Python で

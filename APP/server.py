@@ -48,7 +48,9 @@ def listen_port() -> int:
     return 8080
 import server_dataset  # Dataset CRUD endpoints
 import server_train  # LoRA training job management
-from data_paths import outputs_dir, voices_metadata_path, migrate_legacy_voices
+from data_paths import (outputs_dir, voices_metadata_path, migrate_legacy_voices,
+                        manual_checkpoint, OPTIONAL_MODELS,
+                        missing_optional_model_message)
 
 # Migrate APP/references/ + APP/metadata.json into the new voices/ layout
 # if needed. Idempotent; runs once per process at import time.
@@ -86,6 +88,10 @@ MODELS = {
     "v3_voice_design": "Aratako/Irodori-TTS-600M-v3-VoiceDesign",
     "v4": "Aratako/Irodori-TTS-v4-Small",
     "v4_1": "Aratako/Irodori-TTS-v4.1-Small",
+    # 第三者（phasefield-audio）が v4.1-Small をアニメ調音声で追加学習したもの。
+    # 上流ではないので setup.bat の取得対象には含めない。使いたい人が自分で
+    # 取得する前提で、置いていなければ選んだ時点でエラーになる。
+    "v4_1_anime": "phasefield-audio/Irodori-TTS-v4.1-Anime",
 }
 
 def _resolve_checkpoint(repo_id: str) -> str:
@@ -100,11 +106,16 @@ def _resolve_checkpoint(repo_id: str) -> str:
     権限が無いと WinError 1314 になるため）。その形だと hf_hub_download は
     ETag を照合できず、キャッシュがあっても毎回 HEAD を投げてしまう。
     """
+    manual = manual_checkpoint(repo_id)
+    if manual is not None:
+        return manual
     try:
         return hf_hub_download(
             repo_id=repo_id, filename="model.safetensors", local_files_only=True
         )
     except Exception as exc:  # noqa: BLE001
+        if repo_id in OPTIONAL_MODELS:
+            raise RuntimeError(missing_optional_model_message(repo_id)) from exc
         raise RuntimeError(
             f"{repo_id} の model.safetensors が見つかりません。"
             "setup.bat を再実行してモデルを取得してください。"
@@ -119,8 +130,33 @@ _CFG_DEFAULTS = {
     # 条件づけの作りは同じ。既定値も揃える。
     "v4": {"text": 3.0, "speaker": 5.0},
     "v4_1": {"text": 3.0, "speaker": 5.0},
+    # Anime は v4.1-Small の追加学習なので条件づけの作りは同じ。
+    "v4_1_anime": {"text": 3.0, "speaker": 5.0},
     "_": {"text": 2.0, "speaker": 3.0},
 }
+
+# LoRA を当てられるベースの組。学習時と別のベースに当てるのは基本的に事故
+# だが、重みが違うだけで構造が同じものは当てられる。
+#
+#   v4_1 と v4_1_anime: Anime は v4.1-Small の追加学習。safetensors の
+#   キー 714 件と全ての形状が一致することを実測で確認済み。どちらで作った
+#   LoRA も、もう一方に当てて動く。声の傾向は当てた側のベースに寄る。
+#   v4 と v4_1 は入れない。構造は同じで読み込めるが、公式レシピの LoRA は
+#   modules_to_save に duration_predictor を含み、PEFT がモジュールごと
+#   置換する。v4.1 の改良点はそこだけなので、当てると丸ごと上書きされて
+#   v4 に当てたのと同じ出力になる（同一 seed で sha256 一致を実測）。
+#   「使えない」のではなく「v4.1 を選ぶ意味が消える」ので通さない。
+_BASE_ALIASES = (
+    frozenset({"v4_1", "v4_1_anime"}),
+)
+
+
+def is_lora_compatible(lora_base: str, model_type: str) -> bool:
+    """LoRA の学習ベースと、当てようとしているモデルが噛み合うか。"""
+    if lora_base == model_type:
+        return True
+    pair = {lora_base, model_type}
+    return any(pair <= group for group in _BASE_ALIASES)
 
 
 def cfg_defaults_for(model_type: str) -> dict:
@@ -493,7 +529,7 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
     # （実測で確認）。使えないのではなく「v4.1 にする意味が消える」ので、
     # 黙って通さず理由を返す。
     lora_base = server_lora.lora_base_of(lora_name_raw)
-    if lora_base and lora_base != model_type:
+    if lora_base and not is_lora_compatible(lora_base, model_type):
         hint = ""
         if {lora_base, model_type} == {"v4", "v4_1"}:
             hint = ("。v4 の LoRA は duration predictor を丸ごと持つため、"
@@ -743,7 +779,9 @@ async def openai_audio_speech(request: Request):
                 "error": f"unknown model {model_param!r}. Expected one of "
                          f"{[m for m in sorted(MODELS) if not is_voice_design_model(m)]} or tts-1.",
             })
-        if lora_name and model_param != model_type:
+        # 判定はネイティブの口と同じ規則に揃える。ここだけ厳密一致にすると、
+        # UI では当てられる LoRA が OpenAI 互換の口でだけ 400 になる。
+        if lora_name and not is_lora_compatible(model_type, model_param):
             return JSONResponse(status_code=400, content={
                 "error": f"LoRA {lora_name!r} is for {model_type}, not {model_param}.",
             })

@@ -38,6 +38,41 @@ def data_root() -> Path:
     return base
 
 
+# setup.bat が取得しないモデル。上流ではないものを必須依存にすると、配布元が
+# 消えた時点で全員のセットアップが失敗する。使いたい人だけが手で置く。
+OPTIONAL_MODELS = frozenset({"phasefield-audio/Irodori-TTS-v4.1-Anime"})
+
+
+def manual_models_dir() -> Path:
+    """setup.bat が取得しない任意モデルを手で置く場所。
+
+    HF のキャッシュは snapshots/<コミットハッシュ>/ という構造で、手で
+    組み立てさせるのは無理がある。リポジトリ名そのままのフォルダに
+    model.safetensors を置くだけで使えるようにする。
+
+    ユーザーデータ（IRODORI_DATA_DIR で動かせる）ではなくアプリの資材なので、
+    data_root() ではなくリポジトリ直下に固定する。
+    """
+    return Path(__file__).resolve().parent.parent / "models" / "manual"
+
+
+def manual_checkpoint(repo_id: str) -> str | None:
+    """models/manual/<リポジトリ名>/model.safetensors があればその絶対パス。"""
+    path = manual_models_dir() / repo_id.split("/")[-1] / "model.safetensors"
+    return str(path) if path.is_file() else None
+
+
+def missing_optional_model_message(repo_id: str) -> str:
+    """任意モデルが置かれていないときの案内。生成と学習で同じ文面を使う。"""
+    name = repo_id.split("/")[-1]
+    return (
+        f"{repo_id} が見つかりません。これは上流ではない任意のモデルで、"
+        "setup.bat では取得しません。"
+        f"https://huggingface.co/{repo_id} から model.safetensors を"
+        f"ダウンロードして、{manual_models_dir() / name} に置いてください。"
+    )
+
+
 def loras_dir() -> Path:
     path = data_root() / "loras"
     path.mkdir(parents=True, exist_ok=True)

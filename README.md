@@ -58,13 +58,52 @@ Radeon は試験対応です。生成は動く見込みですが、AMD は Windo
 
 | タブ | 役割 |
 |-|-|
-| Synthesize | テキスト→音声合成（v4.1 / v4 / v3 / v2 と VoiceDesign 2種の計6モデル） |
+| Synthesize | テキスト→音声合成（v4.1 / v4 / v3 / v2 と VoiceDesign 2種の計6モデル、任意で Anime を追加可） |
 | Dataset | 音声の自動分割→書き起こし→データセット化 |
 | Train | データセットから LoRA を学習 |
 | 朗読 | テキストファイルを連続合成、しおり機能 |
 | 青空文庫 | 著作権切れ作品を検索・取得して朗読へ渡す |
 | LoRAマージ | 複数の LoRA を比率指定で合成 |
 | 辞書 | 読み間違いの矯正 |
+
+---
+
+## 任意で追加できるモデル
+
+`setup.bat` が取得するのは上流（Aratako 氏）のモデルだけです。それ以外を使いたい
+場合は、手動で置けば選択肢に出ます。
+
+### v4.1-Anime
+
+v4.1-Small をアニメ調の音声で追加学習した、第三者製のモデルです。
+
+| | |
+|-|-|
+| 配布元 | [phasefield-audio/Irodori-TTS-v4.1-Anime](https://huggingface.co/phasefield-audio/Irodori-TTS-v4.1-Anime) |
+| ライセンス | MIT（倫理的な制限もベースモデルと同じものを引き継ぎます） |
+| サイズ | 約 2.9GB |
+
+**置き方**
+
+1. 上のページから `model.safetensors` をダウンロードします
+2. `models\manual\Irodori-TTS-v4.1-Anime\` を作ります
+3. そこに `model.safetensors` を置きます
+
+```
+models\manual\Irodori-TTS-v4.1-Anime\model.safetensors
+```
+
+アプリを起動すると、モデル選択に「v4.1-Anime」が出ます。置いていなければ選んだ
+時点でエラーになるだけで、他の動作には影響しません。
+
+**LoRA について**
+
+v4.1-Small と構造が同じ（safetensors のキー 714 件と全ての形状が一致）なので、
+**v4.1 用に作った LoRA はそのまま当てられます。** 作り直す必要はありません。
+声の傾向は、当てた側のベースに寄ります。
+
+このモデルは上流ではないため `setup.bat` の取得対象に入れていません。配布元が
+なくなってもセットアップは通ります。
 
 ---
 
