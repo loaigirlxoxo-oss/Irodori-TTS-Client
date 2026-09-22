@@ -49,3 +49,9 @@ APP/_ids.txt
 # --- setup.bat が取得するモデル（HF_HOME）---
 # 約12GB。再取得できるので追跡しない。
 /models/
+
+# かんたん学習の生成ジョブ（作業用・再生成できる）
+/APP/easy_jobs/
+
+# かんたん学習が残す402本（作業用・作り直せる）
+/APP/easy_samples/

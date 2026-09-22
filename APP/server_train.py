@@ -1087,6 +1087,9 @@ class StartJobRequest(BaseModel):
         False,
         description="If true, delete an existing LoRA with the same name before starting",
     )
+    # かんたん学習が自分の学習を始めるための合言葉。外から使う口では
+    # 渡らないので、かんたん学習中の学習開始を断れる。
+    easy_token: str | None = None
 
     @model_validator(mode="after")
     def _clamp_intervals(self) -> "StartJobRequest":
@@ -1118,6 +1121,11 @@ def start_job(req: StartJobRequest) -> JSONResponse:
     if req.preset not in PRESETS:
         raise HTTPException(400, f"preset must be one of {list(PRESETS)}")
 
+    # かんたん学習が動いている間は始めない。同じ GPU で2つ学習すると
+    # 8GB 級では両方落ちる。かんたん学習自身がここを呼ぶので、合言葉を
+    # 持っているものだけ通す。
+    import server_easy
+
     dataset_root = get_dataset_dir(req.dataset)
     if not dataset_root.is_dir():
         raise HTTPException(404, f"dataset {req.dataset!r} not found")
@@ -1129,7 +1137,13 @@ def start_job(req: StartJobRequest) -> JSONResponse:
     # 実害がない。同名を上書きするかどうかは、採用する人がその場で判断する。
     # req.lora_name は History の表示と、採用時の既定の登録名に使う。
 
-    with _active_lock:
+    # 受付はかんたん学習と同じロックの中で決める。外で確認すると、互いに
+    # 「相手は動いていない」と見てから互いに登録してしまう。
+    with server_easy.GPU_LOCK, _active_lock:
+        if (req.easy_token != server_easy.INTERNAL_TOKEN
+                and server_easy.active_job_id()):
+            raise HTTPException(
+                409, "かんたん学習の最中です。終わるまで学習を始められません。")
         if _active_job_id is not None:
             cur = _read_status(_active_job_id) or {}
             # 判定は _ACTIVE_STATES に一本化する。ここにタプルをベタ書きすると
@@ -1565,13 +1579,13 @@ def register_job_checkpoint(job_id: str, req: RegisterCheckpointRequest) -> JSON
     # 試聴の一時登録は名前を隠しているぶん /loras に出てこない。呼び出し側が
     # 声質の有無を引けないと、完パケでも参照音声を足してしまい本番と違う音になる。
     # 判定はアダプタ自体から出るので、ここで返す。
-    from server_lora import _provides_from_meta, PREVIEW_LORA_NAME
+    from server_lora import _provides_from_meta, is_preview_lora
     provides = _provides_from_meta({}, Path(entry["path"]))
 
     # 採用したことをジョブ側にも残す。学習しただけでは何も登録されないので、
     # どの回をどの名前で採ったかはここでしか記録されない。
     # 試聴の鳴らし比べは同じ API を一時名で叩くだけなので、採用とは扱わない。
-    if lora_name != PREVIEW_LORA_NAME:
+    if not is_preview_lora(lora_name):
         _update_status(
             job_id,
             registered_as=lora_name,

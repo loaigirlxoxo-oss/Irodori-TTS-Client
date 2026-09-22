@@ -27,6 +27,7 @@
       <!-- Tab nav -->
       <nav class="tab-bar nav">
         <button class="tab-btn active" data-tab="synthesize"><svg class="i i-sm"><use href="#ic-wave"/></svg>生成</button>
+        <button class="tab-btn" data-tab="easy"><svg class="i i-sm"><use href="#ic-spark"/></svg>かんたん学習</button>
         <button class="tab-btn" data-tab="dataset"><svg class="i i-sm"><use href="#ic-db"/></svg>データセット</button>
         <button class="tab-btn" data-tab="train"><svg class="i i-sm"><use href="#ic-spark"/></svg>学習</button>
         <button class="tab-btn" data-tab="narrate"><svg class="i i-sm"><use href="#ic-book"/></svg>朗読</button>
@@ -292,8 +293,9 @@
           </div>
 
           <div id="caption-wrapper" class="hidden">
-            <label for="caption-input" class="cap">説明文（Voice Design のみ）</label>
+            <label for="caption-input" class="cap">説明文（どんな声か）</label>
             <textarea id="caption-input" placeholder="落ち着いた女性の声で" rows="2"></textarea>
+            <p class="note" id="caption-note"></p>
           </div>
 
           <div class="action-bar">
@@ -382,6 +384,246 @@
       </div> <!-- /tab-pane synthesize -->
 
       <!-- Train tab -->
+      <div class="tab-pane" data-tab="easy">
+        <p class="note">声を決めたら、あとは全部おまかせです。手持ちの素材は要りません。</p>
+
+        <!-- 1 声をつくる（操作するのはここだけ） -->
+        <section class="card" id="easy-step1">
+          <div class="card-hd"><span class="cap">1. 声をつくる</span></div>
+          <div class="card-body">
+            <div class="act-row" style="margin:0 0 10px">
+              <label class="easy-radio">
+                <input type="radio" name="easy-src" value="design" checked /> 声を作る
+              </label>
+              <label class="easy-radio">
+                <input type="radio" name="easy-src" value="voice" /> 手持ちの音声から選ぶ
+              </label>
+              <label class="easy-radio">
+                <input type="radio" name="easy-src" value="folder" /> フォルダの音声をそのまま使う
+              </label>
+              <!-- 縦を使わないよう、行の余りに右寄せで置く -->
+              <span class="easy-seed-box">
+                <label for="easy-seed-input">seed</label>
+                <input id="easy-seed-input" type="number" class="easy-seed-in"
+                       placeholder="空ならランダム" min="0" />
+              </span>
+            </div>
+
+            <div id="easy-src-design">
+              <label for="easy-caption">どんな声にしますか</label>
+              <input id="easy-caption" type="text" placeholder="落ち着いた大人の女性話者。低く甘い声で、ゆったり話している。" />
+
+              <!-- 効く語と例文。数字は v4.1 の実測（同じ本文・seed 3つの平均、
+                   「女性話者。」= F0 244Hz / 5.88秒 を基準にした差）。 -->
+              <details class="easy-fold" style="margin-top:6px">
+                <summary>書き方のコツと、効く言葉</summary>
+                <div class="easy-fold-body">
+                  <ol class="easy-tips">
+                    <li>性別と年齢を、先に名詞で言い切る（<b>幼い女性話者</b> / <b>大人の男性</b>）</li>
+                    <li>声質は1つだけ足す（かすれた・鼻にかかった・細い）</li>
+                    <li>句点で切って、振る舞いを別の文にする（<b>〜話している。</b>）</li>
+                    <li>喜怒哀楽はここでは効かない。セリフの<b>絵文字タグ</b>で付ける</li>
+                    <li>形容詞を4つ以上重ねない。矛盾させない</li>
+                  </ol>
+
+                  <div class="easy-tbl-wrap">
+                    <table class="easy-tbl">
+                      <thead><tr><th>言葉</th><th>高さ</th><th>速さ</th><th>効き</th></tr></thead>
+                      <tbody>
+                        <tr><td>男性</td><td>−119Hz</td><td>速い</td><td class="s5">最大</td></tr>
+                        <tr><td>幼い</td><td>+81Hz</td><td>遅い</td><td class="s4">大</td></tr>
+                        <tr><td>高い</td><td>+70Hz</td><td>—</td><td class="s4">大</td></tr>
+                        <tr><td>少女</td><td>+63Hz</td><td>—</td><td class="s4">大</td></tr>
+                        <tr><td>ささやき</td><td>—</td><td>かなり遅い</td><td class="s4">大</td></tr>
+                        <tr><td>年配</td><td>−20Hz</td><td>遅い</td><td class="s3">中</td></tr>
+                        <tr><td>早口</td><td>—</td><td>速い</td><td class="s3">中</td></tr>
+                        <tr><td>かすれた / 細い</td><td>—</td><td>遅い</td><td class="s3">中</td></tr>
+                        <tr><td>大人</td><td>−7Hz</td><td>—</td><td class="s3">中</td></tr>
+                        <tr class="bad"><td>低い</td><td>＋に転ぶことあり</td><td>遅い</td><td class="s1">逆効果</td></tr>
+                        <tr class="bad"><td>怒って / 悲しそう / 楽しそう</td><td>±20Hz</td><td>—</td><td class="s1">ほぼ無し</td></tr>
+                        <tr class="bad"><td>落ち着いた / 穏やか / 近い距離感</td><td>±5Hz</td><td>—</td><td class="s1">ほぼ無し</td></tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <p class="note">
+                    低い女性の声は「低い」では下がりません（実測で逆に上がる）。
+                    <b>大人の</b>を足すのが効きます。それでも 170Hz あたりが下限なので、
+                    さらに下げたいときは下の「声の微調整」で高さを下げてください。
+                  </p>
+
+                  <p class="easy-ex-h">そのまま使える例</p>
+                  <ul class="easy-ex">
+                    <li>落ち着いた大人の女性話者。低く甘い声で、ゆったりと甘えるように話している。</li>
+                    <li>幼い女性話者。一生懸命だけど少しドジっぽく、時々慌てて話している。</li>
+                    <li>余裕のある大人の男性。くだけた雰囲気で、呆れながらも楽しそうに話している。</li>
+                    <li>かすれた声の年配の男性話者。ゆっくりと、噛みしめるように話している。</li>
+                    <li>ささやき声の若い女性話者。耳元で、息を混ぜながら話している。</li>
+                  </ul>
+                  <p class="note">
+                    同じ文でも引くたびに声は変わります。気に入らなければ seed を空にして
+                    生成し直すか、seed を入れて同じ声を出し直してください。
+                  </p>
+                </div>
+              </details>
+            </div>
+
+            <div id="easy-src-folder" class="hidden">
+              <label>音声の入ったフォルダ</label>
+              <div class="act-row" style="margin:0">
+                <button id="easy-pick-folder" class="btn btn-ghost btn-sm">
+                  <svg class="i i-sm"><use href="#ic-folder"/></svg>フォルダを選ぶ
+                </button>
+                <span id="easy-folder-name" class="note">選ばれていません</span>
+              </div>
+              <p class="note">
+                中の音声をそのまま学習素材にします。生成はしません。
+                読み上げ内容は書き起こして自動で付けます。
+              </p>
+            </div>
+
+            <div id="easy-src-voice" class="hidden">
+              <label>使う音声ファイル</label>
+              <div class="act-row" style="margin:0">
+                <button id="easy-pick-file" class="btn btn-ghost btn-sm">
+                  <svg class="i i-sm"><use href="#ic-folder"/></svg>ファイルを選ぶ
+                </button>
+                <span id="easy-file-name" class="note">選ばれていません</span>
+              </div>
+              <p class="note">
+                この音声を基準に402本を作ります。4秒以上あると声が安定します。
+              </p>
+            </div>
+
+            <div id="easy-design-only">
+              <div class="easy-inline" style="margin-top:10px;align-items:flex-end">
+                <div style="flex:1 1 auto;min-width:0">
+                  <label for="easy-sample-text">試しに言わせるセリフ</label>
+                  <input id="easy-sample-text" type="text"
+                         value="こんばんは。今日はよく晴れていて、空気も澄んでいる気持ちのいい夜ですね。" />
+                </div>
+                <div style="flex:0 0 auto">
+                  <label for="easy-vd-model">モデル</label>
+                  <select id="easy-vd-model" class="easy-model">
+                    <option value="v4_1">v4.1</option>
+                    <option value="v3_voice_design">VoiceDesign v3</option>
+                    <option value="voice_design">VoiceDesign v2</option>
+                  </select>
+                </div>
+              </div>
+
+              <!-- 感情・演出タグ。生成タブと同じものを renderEmojis が入れる。 -->
+              <div id="easy-emoji-toolbar" class="emoji-toolbar"></div>
+
+              <div class="act-row" style="margin-top:12px">
+                <button id="easy-draw" class="btn btn-primary btn-gen">
+                  <svg class="i"><use href="#ic-gen"/></svg><span>生成</span>
+                  <div class="spinner hidden" id="easy-draw-spinner"></div>
+                </button>
+                <span id="easy-seed" class="note"></span>
+              </div>
+              <p id="easy-gen-status" class="note"></p>
+            </div>
+
+            <audio id="easy-preview" controls style="width:100%;margin-top:8px;display:none"></audio>
+
+            <label for="easy-lora-name" style="margin-top:12px">この声につける名前</label>
+            <input id="easy-lora-name" type="text" placeholder="みどり" />
+
+
+            <details class="easy-fold" style="margin-top:12px">
+              <summary>声の微調整</summary>
+              <div class="easy-fold-body">
+                <div class="easy-tune">
+                  <div class="easy-knob">
+                    <label for="easy-pitch">声の高さ <span class="v" id="easy-val-pitch">0</span></label>
+                    <input type="range" id="easy-pitch" min="-6" max="6" step="0.5" value="0" />
+                    <div class="easy-ends"><span>低い</span><span>高い</span></div>
+                  </div>
+
+                  <div class="easy-knob">
+                    <label for="easy-formant">声の太さ <span class="v" id="easy-val-formant">0</span></label>
+                    <input type="range" id="easy-formant" min="-5" max="5" step="0.5" value="0" />
+                    <div class="easy-ends"><span>太い・大人っぽい</span><span>細い・幼い</span></div>
+                  </div>
+
+                  <div class="easy-knob">
+                    <label for="easy-breath">息づかい <span class="v" id="easy-val-breath">0</span></label>
+                    <input type="range" id="easy-breath" min="0" max="5" step="0.5" value="0" />
+                    <div class="easy-ends"><span>はっきり</span><span>息っぽい</span></div>
+                  </div>
+
+                  <div class="easy-knob">
+                    <label for="easy-bright">音の明るさ <span class="v" id="easy-val-bright">0</span></label>
+                    <input type="range" id="easy-bright" min="-5" max="5" step="0.5" value="0" />
+                    <div class="easy-ends"><span>こもった</span><span>明るい</span></div>
+                  </div>
+
+                </div>
+
+                <p class="note" id="easy-tune-note">生成しなおさずに、いまの声をそのまま調整します。</p>
+                <div class="act-row" style="margin:0">
+                  <button id="easy-tune-reset" class="btn btn-ghost btn-sm">初期値に戻す</button>
+                </div>
+              </div>
+            </details>
+
+            <div class="act-row" style="margin-top:12px">
+              <button id="easy-start" class="btn btn-primary btn-gen" disabled>
+                <svg class="i"><use href="#ic-spark"/></svg><span>この声で作る</span>
+                <div class="spinner hidden" id="easy-start-spinner"></div>
+              </button>
+              <span id="easy-step1-status" class="note"></span>
+            </div>
+          </div>
+        </section>
+
+        <!-- 参照ボイスに読ませるセリフ集。触らなくても進められるので畳んでおく -->
+        <section class="card">
+          <details class="easy-fold">
+            <summary>参照ボイス用セリフ集 <span id="easy-lines-count" class="note"></span></summary>
+            <div class="easy-fold-body">
+              <p class="note" id="easy-lines-info">読み込み中…</p>
+              <p class="note">
+                決めた声にこのセリフを読ませて、学習の素材にします。45種類の言い方を
+                散らしてあるので、そのままで大丈夫です。言わせたい内容が決まっている
+                ときだけ編集してください。
+              </p>
+              <div class="act-row" style="margin:0">
+                <button id="easy-open-lines" class="btn btn-ghost btn-sm">編集</button>
+                <button id="easy-reload-lines" class="btn btn-ghost btn-sm">読み直す</button>
+              </div>
+            </div>
+          </details>
+        </section>
+
+        <!-- 2〜4 は進捗の表示だけ。横に並べて縦を詰める -->
+        <div class="easy-steps">
+          <section class="card">
+            <div class="card-hd"><span class="cap">2. 生成</span></div>
+            <div class="card-body">
+              <div class="prog"><i id="easy-gen-bar"></i></div>
+              <p id="easy-step2-status" class="note">待機中</p>
+            </div>
+          </section>
+          <section class="card">
+            <div class="card-hd"><span class="cap">3. 学習</span></div>
+            <div class="card-body">
+              <div class="prog"><i id="easy-train-bar"></i></div>
+              <p id="easy-step3-status" class="note">待機中</p>
+            </div>
+          </section>
+          <section class="card">
+            <div class="card-hd"><span class="cap">4. 確認と登録</span></div>
+            <div class="card-body">
+              <div class="prog"><i id="easy-eval-bar"></i></div>
+              <p id="easy-step4-status" class="note">待機中</p>
+            </div>
+          </section>
+        </div>
+
+        <p id="easy-result" class="note" style="display:none;margin-top:10px"></p>
+      </div>
+
       <div class="tab-pane" data-tab="train">
         <div class="work-full">
 

@@ -50,6 +50,35 @@ _vad_lock = threading.Lock()
 _whisper_model = None
 _whisper_lock = threading.Lock()
 
+# 書き起こしが何本走っているか。かんたん学習は工程の区切りでこのモデルを
+# 手放して VRAM を返すが、走っている最中に手放すと、次の書き起こしが
+# 「キャッシュが空」と見て2つ目をGPUへ載せてしまう（一時的に倍載る）。
+# 誰も使っていないときだけ手放せるように数える。
+_whisper_users = 0
+_whisper_users_lock = threading.Lock()
+
+
+def whisper_busy() -> bool:
+    with _whisper_users_lock:
+        return _whisper_users > 0
+
+
+def release_whisper_if_idle() -> bool:
+    """誰も使っていなければモデルを手放す。
+
+    確認と破棄を同じロックの中でやる。分けると、確認の直後に始まった
+    書き起こしがモデルを取り出したあとでキャッシュが空になり、その次の
+    書き起こしが2つ目をGPUへ載せる。
+    書き起こしの側は、このロックを取って数を増やしてからモデルを取りに行く。
+    """
+    global _whisper_model
+
+    with _whisper_users_lock:
+        if _whisper_users > 0:
+            return False
+        _whisper_model = None
+        return True
+
 
 def _get_vad_model():
     global _vad_model
@@ -78,10 +107,23 @@ def _get_whisper_model():
                 from transformers import WhisperProcessor, WhisperForConditionalGeneration
                 device = "cuda" if torch.cuda.is_available() else "cpu"
                 dtype = torch.float16 if device == "cuda" else torch.float32
-                processor = WhisperProcessor.from_pretrained(WHISPER_REPO)
-                model = WhisperForConditionalGeneration.from_pretrained(
-                    WHISPER_REPO, torch_dtype=dtype
-                ).to(device)
+                # 取りに行かずキャッシュだけで解決する（server.py の
+                # resolve_checkpoint と同じ方針）。fetch_models.py は
+                # シンボリックリンクを張らない形でキャッシュへ入れるので、
+                # ETag を照合できず、あっても毎回 HEAD を投げてしまう。
+                # かんたん学習は工程の区切りでこのモデルを手放して読み直す
+                # ため、そのたびに問い合わせると遅いうえ、実際に失敗した。
+                try:
+                    processor = WhisperProcessor.from_pretrained(
+                        WHISPER_REPO, local_files_only=True)
+                    model = WhisperForConditionalGeneration.from_pretrained(
+                        WHISPER_REPO, torch_dtype=dtype, local_files_only=True
+                    ).to(device)
+                except Exception as exc:  # noqa: BLE001
+                    raise RuntimeError(
+                        f"{WHISPER_REPO} が見つかりません。"
+                        "setup.bat を再実行してモデルを取得してください。"
+                    ) from exc
                 model.eval()
                 _whisper_model = {
                     "processor": processor,
@@ -244,7 +286,19 @@ def _load_audio_for_pipeline(wav_path: Path) -> tuple:
 @router.post("/api/v1/audio/transcribe")
 def transcribe(req: TranscribeRequest) -> JSONResponse:
     """Transcribe one audio file with Anime-whisper (direct model path)."""
+    global _whisper_users
+
     src = _resolve_wav(req.path)
+    with _whisper_users_lock:
+        _whisper_users += 1
+    try:
+        return _transcribe_inner(req, src)
+    finally:
+        with _whisper_users_lock:
+            _whisper_users -= 1
+
+
+def _transcribe_inner(req: "TranscribeRequest", src) -> JSONResponse:
     state = _get_whisper_model()
     processor = state["processor"]
     model = state["model"]

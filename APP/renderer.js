@@ -55,6 +55,24 @@ function applyDict(text) {
 const VOICE_DESIGN_MODELS = ['voice_design', 'v3_voice_design'];
 const isVoiceDesignModel = m => VOICE_DESIGN_MODELS.includes(String(m));
 
+// 説明文（キャプション）で声を指定できるモデル。VoiceDesign 専用ではない。
+// v4 系は設定が use_caption_condition: true で、重みにも caption 用の層が入る。
+// server.py の _CAPTION_MODELS と同じ顔ぶれにすること。
+const CAPTION_MODELS = ['v4_1', 'v4_1_anime', 'v4'];
+const acceptsCaption = m => isVoiceDesignModel(m) || CAPTION_MODELS.includes(String(m));
+
+// VoiceDesign は説明文が要る。v4 系は書かなくても鳴る。
+function syncCaptionField(modelType) {
+  if (!captionWrapper) return;
+  captionWrapper.classList.toggle('hidden', !acceptsCaption(modelType));
+  const note = document.getElementById('caption-note');
+  if (note) {
+    note.textContent = isVoiceDesignModel(modelType)
+      ? 'このモデルは説明文で声を決めます。'
+      : '書くと声が変わります。空のままでも鳴ります。参照音声と一緒にも使えます。';
+  }
+}
+
 // v4 系（v4-Small と v4.1-Small）。v4.1 は duration predictor だけを
 // 差し替えたもので、条件づけの作りは v4 と同じ。
 const V4_MODELS = ['v4', 'v4_1', 'v4_1_anime'];
@@ -610,6 +628,13 @@ function setupTabSwitching() {
   const panes = document.querySelectorAll('.tab-pane');
   tabs.forEach(btn => {
     btn.addEventListener('click', () => {
+      // かんたん学習が走っている間は動かさない。他のタブで鳴らされると、
+      // 同じ GPU の取り合いになって素材に別の声が混ざる。サーバーも断るが、
+      // 押せてしまうと「できない」理由が分かりにくい。
+      if (easyRunning && btn.dataset.tab !== 'easy') {
+        easySay(1, 'かんたん学習の最中です。終わるまで他のタブへ移れません。', true);
+        return;
+      }
       const target = btn.dataset.tab;
       tabs.forEach(t => t.classList.toggle('active', t === btn));
       panes.forEach(p => p.classList.toggle('active', p.dataset.tab === target));
@@ -651,13 +676,16 @@ const EMOJI_GROUP_LABELS = {
   g1: '感情', g2: '声の出し方', g3: '息・間', g4: '物音', g5: '空間・加工',
 };
 
-function renderEmojis() {
-  emojiToolbar.innerHTML = '';
+// toolbar と入れ先を差し替えられるようにしてある。かんたん学習タブが
+// 同じタグを使うため。中身を二重に持つと、片方だけ更新されてずれる。
+function renderEmojis(toolbar = emojiToolbar, resolveTarget = null, open = true) {
+  if (!toolbar) return;
+  toolbar.innerHTML = '';
 
-  // 畳めるようにする。既定では開いておく
+  // 畳めるようにする。生成タブは開いておく
   const box = document.createElement('details');
   box.className = 'tags';
-  box.open = true;
+  box.open = open;
   box.innerHTML =
     `<summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>` +
     `感情・演出タグ <span class="n">${EMOJI_DEFS.length}</span></summary>` +
@@ -684,15 +712,21 @@ function renderEmojis() {
 
       btn.addEventListener('click', () => {
         // 最後に触っていた行へ挿す。どれも触っていなければ 1 行目。
-        const ta = (activeLineTa && ta_alive(activeLineTa)) ? activeLineTa : textInput;
+        const ta = resolveTarget
+          ? resolveTarget()
+          : ((activeLineTa && ta_alive(activeLineTa)) ? activeLineTa : textInput);
+        if (!ta) return;
         const start = ta.selectionStart;
         const end = ta.selectionEnd;
         const text = ta.value;
         ta.value = text.substring(0, start) + item.e + text.substring(end);
         ta.focus();
         ta.selectionStart = ta.selectionEnd = start + item.e.length;
-        if (ta === textInput) updateCharCount();
-        refreshLines();
+        // 行の作り直しは生成タブの都合。差し替え先には関係ない。
+        if (!resolveTarget) {
+          if (ta === textInput) updateCharCount();
+          refreshLines();
+        }
       });
 
       row.appendChild(btn);
@@ -701,7 +735,7 @@ function renderEmojis() {
     wrap.appendChild(group);
   });
 
-  emojiToolbar.appendChild(box);
+  toolbar.appendChild(box);
 }
 
 let isIpUpdated = false;
@@ -948,7 +982,8 @@ function selectVoice(voice) {
   if (isVoiceDesignModel(modelSelect.value)) {
     modelSelect.value = 'v3';
   }
-  captionWrapper.classList.add('hidden');
+  // 参照音声を選んだだけで説明文を消さない。v4 系は両方を同時に使える。
+  syncCaptionField(modelSelect.value);
   // 参照音声の有無で「話し方のみ」LoRA の選択可否が変わるので、一覧を作り直す。
   refreshLoraDropdown();
 }
@@ -977,16 +1012,15 @@ function setupEventListeners() {
   }
 
   modelSelect.addEventListener('change', (e) => {
-    if (isVoiceDesignModel(e.target.value)) {
-      captionWrapper.classList.remove('hidden');
-      clearVoice();
-    } else {
-      captionWrapper.classList.add('hidden');
-    }
+    syncCaptionField(e.target.value);
+    // VoiceDesign は参照音声を取らないので、選ばれていたら外す。
+    if (isVoiceDesignModel(e.target.value)) clearVoice();
     refreshLoraDropdown();
     // 発話速度は v4 専用なので、モデル切替で有効・無効を切り替える
     updateDurationEstimate();
   });
+  // 開いた直後にも当てる。change を待つと、初期表示だけ食い違う。
+  syncCaptionField(modelSelect.value);
 
   const dropZone = document.getElementById('drop-zone');
   
@@ -1363,7 +1397,8 @@ async function generateAudio() {
           text: lines[li].text,
           loraName: condMode === 'lora' ? loraSelect.value : null,
           modelType: modelSelect.value,
-          caption: isVoiceDesign ? captionInput.value.trim() : null,
+          caption: acceptsCaption(modelSelect.value)
+            ? captionInput.value.trim() : null,
           seed: paramSeed.value ? parseInt(paramSeed.value) : null,
         });
       } catch (e) {
@@ -4079,3 +4114,659 @@ bookmarkBtn.addEventListener('click', () => {
   // 初期スロット2つ
   addSlot(); addSlot();
 })();
+
+
+// ============================================================
+// かんたん学習タブ
+//
+// 操作するのは「1. 声をつくる」だけ。声が決まったら、生成 -> 学習 ->
+// 採用・登録までを続けて走らせる。2〜4 は進捗を映すだけで、ボタンは置かない。
+// 途中で人が判断する場面が無いので、押す回数を増やす意味がない。
+// ============================================================
+
+const easyEl = (id) => document.getElementById(id);
+
+// ①で確定した参照音声。以降の生成すべてでこれを固定して使う。
+// VoiceDesign は seed で声が変わるので、キャプションだけでは揃わない。
+let easyRefWav = null;
+let easyRunning = false;
+
+function easyGenSay(text, isError) {
+  // 生成の状態は生成ボタンのすぐ下に出す。段全体の状態欄に出すと、
+  // どの操作に対する応答なのかが分からない。
+  const el = easyEl('easy-gen-status');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = isError ? 'var(--danger, #e06c75)' : '';
+}
+
+function easySay(step, text, isError) {
+  const el = easyEl(`easy-step${step}-status`);
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = isError ? 'var(--danger, #e06c75)' : '';
+}
+
+function easyBar(id, pct) {
+  const el = easyEl(id);
+  if (el) el.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+}
+
+async function easyPost(path, body) {
+  const res = await fetch(`${API_URL}${path}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text.slice(0, 300));
+  return text ? JSON.parse(text) : {};
+}
+
+async function easyGet(path) {
+  const res = await fetch(`${API_URL}${path}`);
+  if (!res.ok) throw new Error(await res.text());
+  return res.json();
+}
+
+async function easyWatch(jobId, onTick) {
+  for (;;) {
+    await new Promise((r) => setTimeout(r, 2000));
+    const s = await easyGet(`/easy/jobs/${jobId}`);
+    onTick(s);
+    if (s.state === 'done') return s;
+    if (s.state === 'failed') throw new Error(s.error || '不明なエラー');
+  }
+}
+
+// --- 微調整 ---
+
+// 加工前の音声。スライダーを動かすたびに、ここから作り直す。
+// 加工済みに重ねがけすると劣化が積もる。
+let easyRawWav = null;
+let easyFolder = null;
+
+const EASY_TUNE = [
+  ['easy-pitch', 'easy-val-pitch', 'pitch_semitones'],
+  ['easy-formant', 'easy-val-formant', 'formant'],
+  ['easy-breath', 'easy-val-breath', 'breathiness'],
+  ['easy-bright', 'easy-val-bright', 'brightness'],
+];
+
+function easyTuneValues() {
+  const out = {};
+  for (const [slider, , key] of EASY_TUNE) {
+    out[key] = parseFloat(easyEl(slider).value) || 0;
+  }
+  return out;
+}
+
+function easySyncTuneLabels() {
+  for (const [slider, label] of EASY_TUNE) {
+    easyEl(label).textContent = easyEl(slider).value;
+  }
+}
+
+function easyPlayUrl(target) {
+  // サーバーが返す /api/v1/outputs/... は http で、手元のファイルは file://。
+  // 混ぜると http://127.0.0.1:8080D:%5C... のような壊れた URL になる。
+  if (!target) return '';
+  return target.startsWith('/api/')
+    ? `${API_ORIGIN}${target}`
+    : `file://${target.replace(/\\/g, '/')}`;
+}
+
+let easyTuneTimer = null;
+let easyTuneSeq = 0;
+let easyTunePending = null;   // 進行中の加工。開始前に待ち合わせる
+// いまの easyRefWav が、つまみの値を反映していない状態。Promise の受け渡し
+// だけで待ち合わせると、加工が済む前に開始ボタンを押された経路や、失敗して
+// 一度待ち終えた後の再試行で取りこぼす。反映できたかどうかを直接持つ。
+let easyTuneDirty = false;
+
+// 加工を始める。開始前の待ち合わせ（easySettleTune）の対象にする。
+// ここで握っておかないと未処理の rejection になるが、失敗したことは
+// easyTuneDirty が持っているので、開始時に改めて止められる。
+function easyStartTune() {
+  easyTuneDirty = true;
+  easyTunePending = easyApplyTune();
+  easyTunePending.catch(() => {});
+  return easyTunePending;
+}
+
+function easyQueueTune() {
+  // つまみを動かしている最中に毎回サーバーへ投げると、読み込みが次々に
+  // 走って再生が途切れる（パチパチ聞こえるのはこれ）。手が止まってから
+  // 一度だけ実行する。
+  easySyncTuneLabels();
+  easyTuneDirty = true;
+  if (easyTuneTimer) clearTimeout(easyTuneTimer);
+  easyTuneTimer = setTimeout(() => {
+    easyTuneTimer = null;
+    easyStartTune();
+  }, 350);
+}
+
+async function easySettleTune() {
+  // つまみを動かした直後に「この声で作る」を押されると、まだ加工前の音声で
+  // 402本が始まってしまう。待っているタイマーを前倒しし、走っている加工が
+  // 終わるまで待つ。
+  if (easyTuneTimer) {
+    clearTimeout(easyTuneTimer);
+    easyTuneTimer = null;
+    easyStartTune();
+  }
+  if (easyTunePending) {
+    try {
+      await easyTunePending;
+    } catch {
+      // 文言は easyApplyTune が出している。ここでは反映できたかだけを見る。
+    } finally {
+      easyTunePending = null;
+    }
+  }
+  // 反映できていなければ進ませない。加工前の音声で402本を作ると、
+  // 学習し直すまで気づけない。
+  return !easyTuneDirty;
+}
+
+async function easyApplyTune() {
+  easySyncTuneLabels();
+  // 加工する音声が無いとき（フォルダをそのまま使うモードなど）は、つまみを
+  // 動かしても当てる先が無い。印を残すと easySettleTune が永久に false を
+  // 返し、「この声で作る」を押しても始まらなくなる。
+  if (!easyRawWav) { easyTuneDirty = false; return; }
+
+  const seq = ++easyTuneSeq;
+  const audio = easyEl('easy-preview');
+  try {
+    const r = await easyPost('/easy/tune', { wav: easyRawWav, ...easyTuneValues() });
+    // 追い越された応答は捨てる。古い結果で上書きすると、つまみと音が食い違う。
+    if (seq !== easyTuneSeq) return;
+
+    easyRefWav = r.url || easyRawWav;
+    easyTuneDirty = false;
+    const url = easyPlayUrl(easyRefWav);
+    if (audio.src !== url) {
+      const wasPlaying = !audio.paused;
+      audio.pause();          // 読み込みの途中で鳴らさない
+      audio.src = url;
+      audio.style.display = '';
+      if (wasPlaying) audio.play().catch(() => {});
+    }
+    // 調整の結果は鳴らした音が答えなので、文字では言わない
+  } catch (e) {
+    if (seq === easyTuneSeq) {
+      easySay(1, `調整に失敗しました: ${e.message}`, true);  // 失敗だけは伝える
+    }
+    // 握りつぶすと、古い音声のまま402本が始まってしまう。呼び出し元に返す。
+    throw e;
+  }
+}
+
+function easyResetTune() {
+  for (const [slider] of EASY_TUNE) easyEl(slider).value = 0;
+  // 通常の調整と同じく待ち合わせの対象にする。ここで取りこぼすと、
+  // 戻した直後に開始したとき、前の加工済み音声で402本が始まる。
+  easyStartTune();
+}
+
+// --- 声の決め方を切り替える ---
+
+function easySource() {
+  const hit = document.querySelector('input[name="easy-src"]:checked');
+  return hit ? hit.value : 'design';
+}
+
+let easySourceShown = null;
+
+function easyApplySource() {
+  const mode = easySource();
+  const switched = easySourceShown !== mode;
+  easySourceShown = mode;
+  const design = mode === 'design';
+  easyEl('easy-src-design').classList.toggle('hidden', !design);
+  easyEl('easy-src-voice').classList.toggle('hidden', mode !== 'voice');
+  easyEl('easy-src-folder').classList.toggle('hidden', mode !== 'folder');
+  // 試聴のセリフ・モデル・生成ボタンは VoiceDesign のときだけのもの。
+  // 手持ちモードで残しておくと、押す意味のないボタンが見えて迷う。
+  easyEl('easy-design-only').classList.toggle('hidden', !design);
+
+  const audio = easyEl('easy-preview');
+
+  // 微調整が何にかかるかはモードで違う。参照1本だけなのか、フォルダの全本
+  // なのかで、押したあとに起きることが変わる。
+  const tuneNote = easyEl('easy-tune-note');
+  if (tuneNote) {
+    tuneNote.textContent = mode === 'folder'
+      ? '1本目で試せます。作るときは、フォルダの音声すべてに同じ調整がかかります（元のファイルは残ります）。'
+      : '生成しなおさずに、いまの声をそのまま調整します。';
+  }
+
+  // モードを跨いで状態を持ち越さない。前のモードで決めた参照音声が残ると、
+  // フォルダ学習の採用判定が無関係な音声を基準にしてしまう。
+  // 切り替わった時だけ消す。選んだ直後にも通るので、無条件だと自分を消す。
+  if (switched) {
+    // 走っている加工を失効させる。待たずに捨てるだけでよい（seq を進めれば
+    // 応答は easyApplyTune 側で捨てられる）。これをしないと、切り替えた後に
+    // 古い応答が届いて easyRefWav が前のモードの音声に戻る。
+    if (easyTuneTimer) { clearTimeout(easyTuneTimer); easyTuneTimer = null; }
+    easyTuneSeq++;
+    easyTunePending = null;
+    easyTuneDirty = false;   // 参照そのものを捨てるので、反映すべき対象が無い
+
+    // 行き先を問わず捨てる。voice へ移ったときに残すと、ファイルを選ばずに
+    // 直前の VoiceDesign 音声で始められてしまう。
+    easyRawWav = null;
+    easyRefWav = null;
+    easyFolder = null;
+    easyEl('easy-file-name').textContent = '選ばれていません';
+    easyEl('easy-folder-name').textContent = '選ばれていません';
+  }
+
+  if (mode === 'folder') {
+    // 微調整はフォルダの全本にかかる。どう変わるかを聞かずに決めることに
+    // ならないよう、1本目を試聴の対象にする。
+    if (easyRawWav) {
+      audio.src = easyPlayUrl(easyRefWav || easyRawWav);
+      audio.style.display = '';
+    } else {
+      audio.style.display = 'none';
+    }
+    easyEl('easy-start').disabled = !easyFolder;
+    easySay(1, easyFolder ? '' : 'フォルダを選んでください');
+    return;
+  }
+
+  if (design) {
+    // 作る側は、生成し直すまで進ませない
+    if (!easyRefWav) {
+      audio.style.display = 'none';
+      easyEl('easy-start').disabled = true;
+      easySay(1, '');
+    }
+    return;
+  }
+
+  // 手持ちを選ぶときは試し聞きがいらない。選んだ時点で基準が決まる。
+  easyEl('easy-start').disabled = !easyRefWav;
+  if (!easyRefWav) easySay(1, '音声ファイルを選んでください');
+  if (easyRefWav) {
+    audio.src = easyPlayUrl(easyRefWav);
+    audio.style.display = '';
+  } else {
+    audio.style.display = 'none';
+    easySay(1, '音声ファイルを選んでください');
+  }
+}
+
+
+async function easyPickFolder() {
+  const dir = await window.api.selectEasyFolder();
+  if (!dir) return;
+  easyFolder = dir;
+  const label = dir.split(/[\\/]/).pop();
+  easyEl('easy-folder-name').textContent = label;
+  // 1本目を試聴の対象にする。つまみを動かすと、この1本で結果を確かめられる。
+  // 学習のときは、同じ設定がフォルダの全本にかかる。
+  easyRawWav = null;
+  easyRefWav = null;
+  try {
+    const r = await easyPost('/easy/folder/peek', { folder: dir });
+    easyRawWav = r.first;
+    easyRefWav = r.first;
+    easyEl('easy-folder-name').textContent = `${label}（${r.count} 本）`;
+  } catch (e) {
+    // 選択も捨てる。残すと開始ボタンが有効なままになり、押しても同じ理由で
+    // 失敗する（空のフォルダ、読めない音声、写し損ねなど）。
+    easyFolder = null;
+    easyEl('easy-folder-name').textContent = '選ばれていません';
+    easySay(1, `フォルダの中が読めませんでした: ${e.message}`, true);
+  }
+  easyTuneDirty = true;
+  easyApplySource();
+  await easyStartTune().catch(() => {});
+}
+
+async function easyPickFile() {
+  const path = await window.api.selectEasyVoice();
+  if (!path) return;
+  easyRawWav = path;
+  easyRefWav = path;
+  easyEl('easy-file-name').textContent = path.split(/[\\/]/).pop();
+  // 当てる前に印を付ける。easyApplySource が開始ボタンを有効にするので、
+  // その後で加工を始めると、間に押された分を待ち合わせられない。
+  easyTuneDirty = true;
+  easyApplySource();
+  // 選んだファイルに、いまのつまみの値をそのまま当てる
+  await easyStartTune().catch(() => {});
+}
+
+// --- 声をつくる ---
+
+async function easyDrawVoice() {
+  const caption = easyEl('easy-caption').value.trim();
+  if (!caption) { easyGenSay('どんな声か書いてください', true); return; }
+
+  // このとき作った音声が、以降402本の参照音声になる。短いと声の基準が
+  // ぶれるので、下限を割ったら止める（ランタイムにも ref_min_seconds がある）。
+  const sample = easyEl('easy-sample-text').value.trim();
+  if (sample.length < 20) {
+    easyGenSay(`セリフが短すぎます（${sample.length}文字）。20文字以上にしてください`, true);
+    return;
+  }
+
+  easyEl('easy-draw').disabled = true;
+  easyEl('easy-draw-spinner')?.classList.remove('hidden');
+  easyGenSay('声をつくっています…');
+  try {
+    // seed が空なら渡さない。押すたびに別の声になる。入っていればその声を
+    // 出し直す（同じ文・同じ seed なら同じ声）。
+    const body = {
+      text: sample,
+      model_type: easyEl('easy-vd-model').value,
+      caption,
+      no_ref: true,
+    };
+    const seedRaw = easyEl('easy-seed-input').value.trim();
+    if (seedRaw !== '') {
+      const n = Number(seedRaw);
+      if (!Number.isSafeInteger(n) || n < 0) {
+        easyGenSay('seed は 0 以上の整数で入れてください', true);
+        return;
+      }
+      body.seed = n;
+    } else {
+      // 空でもこちらで引く。サーバーに任せると 19 桁の値が返り、JavaScript の
+      // 整数の上限（9007199254740991）を超えて丸まる。実測でずれた値を送り直す
+      // ことになり、「固定」しても別の声が出た。自分で引けば必ず戻せる。
+      body.seed = Math.floor(Math.random() * 2147483647);
+    }
+    const r = await easyPost('/synthesize/', body);
+    easyRawWav = r.results[0];
+    easyRefWav = easyRawWav;
+    const audio = easyEl('easy-preview');
+    audio.src = easyPlayUrl(easyRefWav);
+    audio.style.display = '';
+    // 気に入った声を出し直せるように、使った値を出しておく。上の seed 欄に
+    // 入れれば同じ声が出る（こちらで引いているので必ず戻せる）。
+    easyEl('easy-seed').textContent = `seed: ${body.seed}`;
+    easyTuneDirty = true;   // 開始ボタンを有効にする前に印を付ける
+    easyEl('easy-start').disabled = false;
+    easyGenSay('気に入らなければ、もう一度押すと別の声になります');
+    await easyStartTune().catch(() => {});  // つまみを動かしたままでも反映する
+  } catch (e) {
+    easyGenSay(`つくれませんでした: ${e.message}`, true);
+  } finally {
+    easyEl('easy-draw').disabled = false;
+    easyEl('easy-draw-spinner')?.classList.add('hidden');
+  }
+}
+
+// --- ここから先は自動 ---
+
+// 20〜30分の工程が走っている間、声の決め方に触れないようにする。
+// 素材を作ってから採用判定までの間に参照音声が変わると、生成に使った声と
+// 評価の基準が食い違い、別の声のチェックポイントを採ってしまう。
+// かんたん学習の最中は、他のタブのボタンを押せなくする。見た目も薄くして
+// 「いま触れない」と分かるようにする。クリックの入口でも止めている。
+function easyLockTabs(locked) {
+  for (const b of document.querySelectorAll('.tab-btn')) {
+    if (b.dataset.tab === 'easy') continue;
+    b.disabled = locked;
+    b.classList.toggle('locked', locked);
+    b.title = locked ? 'かんたん学習の最中です' : '';
+  }
+}
+
+function easyLockInputs(locked) {
+  const ids = [
+    'easy-pick-file', 'easy-pick-folder', 'easy-tune-reset',
+    'easy-lora-name', 'easy-caption', 'easy-sample-text', 'easy-vd-model',
+  ];
+  for (const [slider] of EASY_TUNE) ids.push(slider);
+  for (const id of ids) {
+    const el = easyEl(id);
+    if (el) el.disabled = locked;
+  }
+  for (const r of document.querySelectorAll('input[name="easy-src"]')) {
+    r.disabled = locked;
+  }
+}
+
+async function easyRunAll() {
+  if (easyRunning) return;
+  // 押された時点で操作を止める。この先に await があるので、開いたままだと
+  // 「検査したときの値」と「実際に使う値」が別物になりうる。
+  easyRunning = true;
+  easyLockInputs(true);
+  easyLockTabs(true);
+  for (const id of ['easy-start', 'easy-draw']) {
+    easyEl(id).disabled = true;
+  }
+
+  // 始められないと分かったら、操作を戻して抜ける。
+  const stop = (msg) => {
+    easyRunning = false;
+    easyLockInputs(false);
+    easyLockTabs(false);
+    easyEl('easy-draw').disabled = false;
+    easyEl('easy-start').disabled = false;
+    easyEl('easy-start-spinner')?.classList.add('hidden');
+    easySay(1, msg, true);
+  };
+
+  // 前段で予期しない例外が出ると、ロックが掛かったまま戻せなくなる
+  // （他のタブへ移れず、開き直すしかない）。念のため受けておく。
+  let name;
+  try {
+    name = easyEl('easy-lora-name').value.trim();
+  } catch (e) {
+    return stop(`始められませんでした: ${e.message}`);
+  }
+  if (!name) return stop('この声につける名前を入れてください');
+  // 名前はそのまま登録先のフォルダ名になる。サーバーの _validate_name と
+  // 同じ規則でここで見る。20〜30分かけてから弾かれると、やり直しになる。
+  // 英数と _ - . 空白、ひらがな・カタカナ・漢字だけ。Windows で作れない
+  // 文字（/ \\ : ? * " < > |）や絵文字は、最後の登録で必ず失敗する。
+  // 素材フォルダとデータセットの名前は「名前_YYYYMMDD_HHMMSS」になる。
+  // 日時で16文字使うので、名前側は48文字までしか入らない。
+  if (name.length > 48) return stop('名前が長すぎます（48文字まで）');
+  // 先頭の _ はデータセット側が予約している。
+  if (name.startsWith('_')) return stop('名前を _ で始めることはできません');
+  if (!/^[A-Za-z0-9_\-. 一-龥ぁ-んァ-ヶー]+$/.test(name)
+      || name === '.' || name === '..') {
+    return stop('名前に使えるのは、英数字とひらがな・カタカナ・漢字と _ - . 空白だけです');
+  }
+  if (easySource() === 'folder') {
+    if (!easyFolder) return stop('フォルダを選んでください');
+  } else if (!easyRefWav) {
+    return stop('先に声を聞いてください');
+  }
+
+  // 登録は同名のフォルダを消して入れ替える。上書きはさせない。使われている
+  // 名前なら、20〜30分かける前に断る（サーバー側の /easy/train も 409 で
+  // 断るが、そこまで進んでから言われても作り直しになる）。
+  try {
+    const list = await easyGet('/loras');
+    const items = Array.isArray(list) ? list : (list.loras || []);
+    if (items.some((x) => (typeof x === 'string' ? x : x && x.name) === name)) {
+      return stop(`「${name}」はもうあります。別の名前を入れてください`);
+    }
+  } catch {
+    // 一覧が取れなかっただけ。名前が使えないと決まったわけではないので
+    // ここでは止めない。重なっていればサーバーが 409 で断る。
+  }
+
+  // 画面のつまみと、これから使う音声を一致させてから進む。ここで失敗したら
+  // 進まない。古い音声で402本を作ってしまうため。
+  if (!await easySettleTune()) {
+    return stop('調整が終わらなかったので中止しました。つまみを動かし直してください');
+  }
+  easyEl('easy-start-spinner')?.classList.remove('hidden');
+  easyEl('easy-result').style.display = 'none';
+  easySay(1, `「${name}」を作っています。終わるまで20〜30分ほどかかります`);
+
+  // データセットと素材フォルダの名前になる。あとから見て分かるように、
+  // 付けた名前と日時にする（エポック秒だと何の回か分からない）。
+  const z = (n) => String(n).padStart(2, '0');
+  const d = new Date();
+  // 秒まで入れる。同じ分に2回走らせると、前回の素材を上書きしてしまう
+  // （失敗してすぐ試し直す、は普通に起きる）。
+  const stamp = `${d.getFullYear()}${z(d.getMonth() + 1)}${z(d.getDate())}`
+    + `_${z(d.getHours())}${z(d.getMinutes())}${z(d.getSeconds())}`;
+  const dataset = `${name}_${stamp}`;
+  // ここから先は画面の値を見ない。工程の途中で変わっても、生成に使った声と
+  // 評価の基準が食い違わないようにする。
+  const fromFolder = easySource() === 'folder';
+  const srcFolder = easyFolder;
+  const srcRef = easyRefWav;
+  try {
+    // 2. 素材を用意する。フォルダなら生成せず、中の音声をそのまま使う。
+    easySay(2, 'はじめています…');
+    const gen = fromFolder
+      ? await easyPost('/easy/folder', {
+          folder: srcFolder, dataset, ...easyTuneValues(),
+        })
+      : await easyPost('/easy/generate', {
+          ref_wav: srcRef, model_type: 'v4_1', dataset,
+        });
+    await easyWatch(gen.job_id, (s) => {
+      if (s.state === 'tuning') {
+        // フォルダの全本に微調整をかけている段。書き起こしの前に入る。
+        const done = s.tuned || 0;
+        const total = s.tune_total || 1;
+        easyBar('easy-gen-bar', (done / total) * 100);
+        easySay(2, `声を調整しています ${done} / ${total} 本`);
+      } else if (s.state === 'screening') {
+        // 生成のあと、失敗作を落とす工程が入る
+        const done = s.screened || 0;
+        const total = s.screen_total || s.total || 1;
+        easyBar('easy-gen-bar', 100);
+        easySay(2, `できを確かめています ${done} / ${total} 本`);
+      } else {
+        const pct = s.total ? (s.done / s.total) * 100 : 0;
+        easyBar('easy-gen-bar', pct);
+        easySay(2, fromFolder
+          ? `書き起こしています ${s.done} / ${s.total} 本`
+          : `${s.done} / ${s.total} 本`);
+      }
+    });
+    easyBar('easy-gen-bar', 100);
+    {
+      const fin = await easyGet(`/easy/jobs/${gen.job_id}`);
+      const r = fin.screen;
+      easySay(2, r
+        ? (r.gave_up
+            ? `${r.total} 本すべて使います`
+            : `${r.kept} / ${r.total} 本を使います（${r.total - r.kept} 本は除外）`)
+        : '終わりました');
+    }
+
+    // 3-4. 学習と採用
+    easySay(3, 'はじめています…');
+    // 学習後の採用判定は SIM を使う。フォルダの場合は基準になる参照が
+    // 無いので、素材の1本目を基準に立てる。
+    const fin2 = await easyGet(`/easy/jobs/${gen.job_id}`);
+    // フォルダのときは素材の1本目を基準にする。加工を掛けていれば素材は
+    // 加工後なので、加工前の試聴用を基準にすると、似ている度がずれて
+    // 別のチェックポイントを選ぶ。生成のときは①で決めた声が基準。
+    const clip0 = fin2.clips && fin2.clips[0] && fin2.clips[0].path;
+    const refForEval = fromFolder ? (clip0 || srcRef) : (srcRef || clip0);
+    const job = await easyPost('/easy/train', {
+      dataset, lora_name: name, ref_wav: refForEval,
+    });
+    await easyWatch(job.job_id, (s) => {
+      if (s.state === 'training' && s.train_total) {
+        easyBar('easy-train-bar', (s.train_step / s.train_total) * 100);
+        easySay(3, `${s.train_step} / ${s.train_total} ステップ`);
+      } else if (s.state === 'evaluating') {
+        easyBar('easy-train-bar', 100);
+        easySay(3, '終わりました');
+        const done = (s.evaluated || []).length;
+        easyBar('easy-eval-bar', done ? Math.min(done * 25, 90) : 10);
+        easySay(4, `できを確かめています（${s.evaluating || ''}）`);
+      }
+    });
+
+    const fin = await easyGet(`/easy/jobs/${job.job_id}`);
+    const p = fin.picked || {};
+    easyBar('easy-eval-bar', 100);
+    easySay(4, '登録しました');
+    const box = easyEl('easy-result');
+    box.style.display = '';
+    box.textContent =
+      `できました: ${name} / 似ている度 ${(p.sim ?? 0).toFixed(3)} / ` +
+      `読み間違い ${((p.cer ?? 0) * 100).toFixed(1)}%` +
+      (p.fallback ? '（どれも基準に届かず、最後のものを使いました）' : '');
+    easySay(1, `できました。生成タブの LoRA 一覧に「${name}」が出ています`);
+    if (typeof loadLoras === 'function') loadLoras();
+  } catch (e) {
+    // どの段で止まったかは、その段のステータスに出ている。
+    easySay(1, `止まりました: ${e.message}`, true);
+  } finally {
+    easyRunning = false;
+    easyLockInputs(false);
+    easyLockTabs(false);
+    easyEl('easy-start-spinner')?.classList.add('hidden');
+    easyEl('easy-draw').disabled = false;
+    // 何を選んでいれば再開できるかはモードで違う。フォルダモードでは
+    // easyRefWav が空なのが正常なので、それで判断すると再試行できない。
+    easyEl('easy-start').disabled =
+      easySource() === 'folder' ? !easyFolder : !easyRefWav;
+  }
+}
+
+// --- セリフ ---
+
+async function easyLoadLines() {
+  try {
+    const r = await easyGet('/easy/lines');
+    const count = easyEl('easy-lines-count');
+    if (count) count.textContent = `${r.count} 本`;
+    easyEl('easy-lines-info').textContent =
+      `${r.count} 本 / ${r.tags} 種類の言い方`;
+  } catch (e) {
+    // 404 はこの口がまだ無いサーバーに繋いでいるとき。アプリを開いたまま
+    // 更新すると起こるので、生の JSON ではなく何をすればよいかを出す。
+    const raw = String(e.message || '');
+    const msg = raw.includes('Not Found')
+      ? 'このタブに対応していないサーバーです。アプリを開き直してください'
+      : (() => {
+          try { return JSON.parse(raw).detail || raw; } catch { return raw; }
+        })();
+    easyEl('easy-lines-info').textContent = msg;
+  }
+}
+
+function initEasyTab() {
+  if (!easyEl('easy-draw')) return;
+  easyEl('easy-draw').addEventListener('click', easyDrawVoice);
+  document.querySelectorAll('input[name="easy-src"]').forEach((r) => {
+    r.addEventListener('change', easyApplySource);
+  });
+  easyEl('easy-pick-file').addEventListener('click', easyPickFile);
+  easyEl('easy-pick-folder').addEventListener('click', easyPickFolder);
+  for (const [slider] of EASY_TUNE) {
+    easyEl(slider).addEventListener('input', easySyncTuneLabels);
+    easyEl(slider).addEventListener('change', easyQueueTune);
+  }
+  // 感情・演出タグ。生成タブと同じ定義を使い、挿し先だけセリフ欄にする。
+  renderEmojis(easyEl('easy-emoji-toolbar'), () => easyEl('easy-sample-text'));
+  easyEl('easy-tune-reset').addEventListener('click', easyResetTune);
+  easySyncTuneLabels();
+  easyEl('easy-start').addEventListener('click', easyRunAll);
+  easyEl('easy-reload-lines').addEventListener('click', easyLoadLines);
+  easyEl('easy-open-lines').addEventListener('click', async () => {
+    try {
+      await window.api.openEasyLines();
+      easyEl('easy-lines-info').textContent =
+        '保存したら「読み直す」を押してください';
+    } catch (e) {
+      easyEl('easy-lines-info').textContent = e.message;
+    }
+  });
+  easyLoadLines();
+}
+
+initEasyTab();

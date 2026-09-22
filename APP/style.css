@@ -474,6 +474,9 @@ body {
   transition: color 0.15s, border-color 0.15s;
 }
 .tab-btn:hover { color: var(--text-main); }
+/* かんたん学習の最中。押せないことを見て分かるようにする */
+.tab-btn.locked { opacity: .35; cursor: not-allowed; }
+.tab-btn.locked:hover { color: inherit; }
 .tab-btn.active {
   color: var(--text-main);
   border-bottom-color: var(--accent, #6366f1);

@@ -10,6 +10,7 @@ is cheap: already-present files are skipped.
 from __future__ import annotations
 
 import sys
+from pathlib import Path
 
 # (repo_id, filename or None for whole-repo, label)
 #
@@ -80,6 +81,36 @@ TARGETS = [
 ]
 
 
+# ECAPA-TDNN（話者の似ている度）。かんたん学習が、生成した素材の選別と
+# チェックポイントの採用に使う。
+#
+# これだけ HF キャッシュではなく models/ecapa に実体で置く。speechbrain の
+# from_hparams が「1つのフォルダに全部入っている」前提で読むため。
+# 上の TARGETS に載せられないのは、汎用の取得経路が .ckpt を除外していて、
+# ECAPA は重みが .ckpt しかないから。
+ECAPA_REPO = "speechbrain/spkrec-ecapa-voxceleb"
+ECAPA_DIR = Path(__file__).resolve().parent.parent / "models" / "ecapa"
+ECAPA_FILES = (
+    "hyperparams.yaml",
+    "embedding_model.ckpt",
+    "mean_var_norm_emb.ckpt",
+    "classifier.ckpt",
+    "label_encoder.txt",
+)
+
+
+def fetch_ecapa() -> None:
+    from huggingface_hub import hf_hub_download
+
+    ECAPA_DIR.mkdir(parents=True, exist_ok=True)
+    for name in ECAPA_FILES:
+        hf_hub_download(
+            repo_id=ECAPA_REPO,
+            filename=name,
+            local_dir=str(ECAPA_DIR),
+        )
+
+
 def fetch(repo_id: str, filename: str | None) -> None:
     from huggingface_hub import HfApi, hf_hub_download
 
@@ -109,14 +140,14 @@ RETRIES = 3
 RETRY_WAIT_SECONDS = 5
 
 
-def fetch_with_retry(repo_id: str, filename: str | None) -> None:
+def with_retry(call) -> None:
     """一時的な回線断で数GBの取得を捨てないよう、少し粘ってから諦める。"""
     import time
 
     last: Exception | None = None
     for attempt in range(1, RETRIES + 1):
         try:
-            fetch(repo_id, filename)
+            call()
             return
         except Exception as exc:  # noqa: BLE001 - 理由を問わず再試行する
             last = exc
@@ -127,8 +158,12 @@ def fetch_with_retry(repo_id: str, filename: str | None) -> None:
     raise last
 
 
+def fetch_with_retry(repo_id: str, filename: str | None) -> None:
+    with_retry(lambda: fetch(repo_id, filename))
+
+
 def main() -> int:
-    total = len(TARGETS)
+    total = len(TARGETS) + 1
     failed: list[str] = []
 
     for i, (repo_id, filename, label) in enumerate(TARGETS, 1):
@@ -140,6 +175,17 @@ def main() -> int:
             print("失敗")
             print(f"        {type(exc).__name__}: {exc}")
             failed.append(label)
+
+    print(f"[{total}/{total}] 話者照合モデル ECAPA（かんたん学習用） ... ",
+          end="", flush=True)
+    try:
+        # 他と同じだけ粘る。1ファイルの瞬断でセットアップ全体を終わらせない。
+        with_retry(fetch_ecapa)
+        print("OK")
+    except Exception as exc:  # noqa: BLE001
+        print("失敗")
+        print(f"        {type(exc).__name__}: {exc}")
+        failed.append("話者照合モデル ECAPA")
 
     print()
     if failed:

@@ -35,6 +35,11 @@ git clone https://github.com/loaigirlxoxo-oss/Irodori-TTS-Client.git
 | GPU | NVIDIA 製・VRAM 8GB 以上を推奨（AMD は試験対応、GPU 無しでも CPU で動作） |
 | 空き容量 | **30GB 以上**（環境 5.7GB ＋ モデル 17GB ＋ 作業領域） |
 
+かんたん学習タブだけは **VRAM 12GB 以上**を見てください。長い文（200文字程度）を
+鳴らす時点で合成に 8.5GB ほど要り、学習と採用の評価まで通すとピークが約 11GB でした
+（RTX 5080 での実測）。8GB だと途中で足りなくなる可能性があります。他のタブは
+8GB で確認しています。
+
 Python は通常 **3.10** を使います。3.11 以降では `sentencepiece` の導入に失敗するためです。
 
 ただし **AMD (Radeon) を使う場合だけ 3.12** が必要です。AMD が配る Windows 用 PyTorch が
@@ -59,6 +64,7 @@ Radeon は試験対応です。生成は動く見込みですが、AMD は Windo
 | タブ | 役割 |
 |-|-|
 | Synthesize | テキスト→音声合成（v4.1 / v4 / v3 / v2 と VoiceDesign 2種の計6モデル、任意で Anime を追加可） |
+| かんたん学習 | 声を決めるだけで、素材の生成→選別→学習→登録までを通す（VRAM 12GB 以上を推奨） |
 | Dataset | 音声の自動分割→書き起こし→データセット化 |
 | Train | データセットから LoRA を学習 |
 | 朗読 | テキストファイルを連続合成、しおり機能 |
@@ -113,9 +119,9 @@ v4.1-Small と構造が同じ（safetensors のキー 714 件と全ての形状�
 
 **確認済み**
 
-- `setup.bat` の完走（Node / Python 環境 / 音声モデル6種＋コーデック・トークナイザ・書き起こし・電子透かし、約17GB）
+- `setup.bat` の完走（Node / Python 環境 / 音声モデル6種＋コーデック・トークナイザ・書き起こし・電子透かし・話者照合、約17GB）
 - CUDA 有効（torch 2.10.0+cu128 / torchcodec 0.10.0）
-- アプリ起動と7タブの表示
+- アプリ起動と8タブの表示
 - 6モデルすべての生成（v4.1 / v4 / v3 / v2 / v3 VoiceDesign / v2 VoiceDesign）
 - 参照音声あり・なしの両方
 - 計算装置（GPU / CPU）と計算精度（fp32 / bf16）の切り替え
@@ -129,6 +135,8 @@ v4.1-Small と構造が同じ（safetensors のキー 714 件と全ての形状�
 
 **未確認**
 
+- かんたん学習タブ。Original 側で通しを確かめたものを移植した状態で、この
+  リポジトリの環境では動かしていません
 - AMD (Radeon) での動作。導入経路は用意しましたが実機で確かめていません
 - Linux / macOS。`setup.bat` と `起動.bat` は Windows 専用です
 

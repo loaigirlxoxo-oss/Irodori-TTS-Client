@@ -52,6 +52,14 @@ function getDataRoot() {
 function getRefsDir()     { return path.join(getDataRoot(), 'voices'); }
 function getMetadataPath(){ return path.join(getRefsDir(), 'metadata.json'); }
 function getOutputsDir()  { return path.join(getDataRoot(), 'outputs'); }
+function getInputsDir()   { return path.join(getDataRoot(), 'inputs'); }
+
+// パスが root の下にあるか。文字列の前方一致だと "inputs-old" のような
+// 名前を "inputs" の中だと誤認する。相対パスにして確かめる。
+function isInside(root, target) {
+  const rel = path.relative(path.resolve(root), path.resolve(target));
+  return rel !== '' && !rel.startsWith('..') && !path.isAbsolute(rel);
+}
 
 function ensureDataLayout() {
   for (const d of [getRefsDir(), getOutputsDir(), getNovelsDir()]) {
@@ -216,6 +224,29 @@ ipcMain.handle('open-voices-folder', async () => {
   return dir;
 });
 
+// 編集して使うセリフファイル。サーバーの user_lines_file() と同じ場所を指す。
+// 同梱のひな形は配布版だとアプリの中にあって書けないので、data の下へ写す。
+// 写すのは一度だけ（手で直したものを、アプリ更新で消さない）。
+function getEasyLinesPath() {
+  const dir = path.join(getDataRoot(), 'presets');
+  const file = path.join(dir, 'easy_train_lines.txt');
+  if (!fs.existsSync(file)) {
+    fs.mkdirSync(dir, { recursive: true });
+    fs.copyFileSync(path.join(__dirname, 'presets', 'easy_train_lines.txt'), file);
+  }
+  return file;
+}
+
+// かんたん学習のセリフを既定のエディタで開く。編集して保存すれば次の生成に
+// そのまま効く。アプリ内にエディタを作らないのは、使い慣れたもので直せる方が
+// 早いから。
+ipcMain.handle('open-easy-lines', async () => {
+  const file = getEasyLinesPath();
+  const err = await shell.openPath(file);
+  if (err) throw new Error(err);
+  return file;
+});
+
 ipcMain.handle('add-voice', async (event, { name, filePath }) => {
   if (!fs.existsSync(filePath)) throw new Error("File not found");
 
@@ -262,6 +293,88 @@ ipcMain.handle('select-file', async () => {
   });
   if (canceled) return null;
   return filePaths[0];
+});
+
+// root の下で使える名前を順に出す。voice.wav が埋まっていたら voice-2.wav。
+function* namesUnder(root, stem, ext) {
+  yield path.join(root, stem + ext);
+  for (let i = 2; i < 1000; i++) yield path.join(root, `${stem}-${i}${ext}`);
+}
+
+// 写し先。既にあるものは消さないし上書きもしない。inputs はユーザーが自分で
+// 素材を置く場所なので、同じ名前を選んだだけで前の中身が消えてはいけない。
+function freshPath(root, base) {
+  const ext = path.extname(base);
+  const stem = path.basename(base, ext);
+  for (const cand of namesUnder(root, stem, ext)) {
+    if (!fs.existsSync(cand)) return cand;
+  }
+  throw new Error(`写し先を作れない: ${path.join(root, base)}`);
+}
+
+// フォルダ版。空のフォルダだけは、消さずにそのまま使ってよい。
+function freshDir(root, name) {
+  for (const cand of namesUnder(root, name, '')) {
+    if (!fs.existsSync(cand)) return cand;
+    if (fs.statSync(cand).isDirectory() && fs.readdirSync(cand).length === 0) return cand;
+  }
+  throw new Error(`置き場を作れない: ${path.join(root, name)}`);
+}
+
+// かんたん学習の「手持ちの音声から選ぶ」。
+//
+// サーバーは outputs / voices / datasets / inputs の外にある音声を拒む
+// （CORS を全開にしているので、任意のパスを読めると外部ページから覗ける）。
+// ダイアログはどこへでも移動できるので、選ばれたものは inputs へ写してから
+// 渡す。そうしないと、デスクトップの wav を選ぶ普通の操作が必ず 403 になる。
+ipcMain.handle('select-easy-voice', async () => {
+  const dir = getInputsDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openFile'],
+    defaultPath: dir,
+    filters: [{ name: 'Audio Files', extensions: ['wav', 'flac', 'mp3', 'ogg'] }],
+  });
+  if (canceled) return null;
+
+  const src = filePaths[0];
+  if (isInside(dir, src)) return src;
+
+  const dst = freshPath(dir, path.basename(src));
+  fs.copyFileSync(src, dst);
+  return dst;
+});
+
+// かんたん学習の「フォルダの音声をそのまま使う」。
+// 選択ファイルと同じ理由で、外にあるフォルダは inputs の下へ写す。
+ipcMain.handle('select-easy-folder', async () => {
+  const base = getInputsDir();
+  fs.mkdirSync(base, { recursive: true });
+  const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
+    properties: ['openDirectory'],
+    defaultPath: base,
+    title: '音声の入ったフォルダを選ぶ',
+  });
+  if (canceled) return null;
+
+  const src = filePaths[0];
+  // inputs そのものを選ぶ操作は普通に起きる（ダイアログの初期位置がここ）。
+  // isInside は root 自身を「中」と見なさないので、ここで先に受ける。
+  // 受けないと inputs/inputs へ写し、しかも下の階層の音声は拾われない。
+  if (path.resolve(base) === path.resolve(src)) return src;
+  if (isInside(base, src)) return src;
+
+  // 写し先は必ず新しく作る。既にあるものを消すと、同じ名前を選んだだけで
+  // ユーザーが inputs に置いていた素材が消える。空でなければ別名にする。
+  const dst = freshDir(base, path.basename(src));
+  fs.mkdirSync(dst, { recursive: true });
+
+  const exts = new Set(['.wav', '.flac', '.mp3', '.ogg']);
+  for (const name of fs.readdirSync(src)) {
+    if (!exts.has(path.extname(name).toLowerCase())) continue;
+    fs.copyFileSync(path.join(src, name), path.join(dst, name));
+  }
+  return dst;
 });
 
 ipcMain.handle('select-folder', async () => {

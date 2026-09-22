@@ -1388,3 +1388,70 @@ textarea, .glass-textarea { height:auto; padding:8px 10px; font-size:14px; line-
 ::-webkit-scrollbar-track { background:transparent; }
 ::-webkit-scrollbar-thumb { background:var(--line-2);border-radius:5px;border:3px solid var(--l0); }
 @media (prefers-reduced-motion:reduce) { *{transition:none!important;animation:none!important} }
+
+/* かんたん学習。入力を2列にし、進捗の3段は横に並べて縦を詰める。
+   工程が4つあるぶん、縦に積むと画面から溢れる。 */
+.easy-cols { display:grid; grid-template-columns:1fr 1fr; gap:14px; }
+/* 入力を主役にし、添え物の選択はその右に小さく置く */
+.easy-inline { display:flex; gap:8px; align-items:center; }
+.easy-inline > input { flex:1 1 auto; min-width:0; }
+/* 「VoiceDesign v3」が省略されずに読める幅。将来 v4 が来ても同じ字数。 */
+.easy-model { width:168px; }
+.easy-steps { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-top:10px; }
+.easy-steps .card-body { padding-top:10px; padding-bottom:10px; }
+.easy-steps .note { margin:6px 0 0; }
+
+/* 幅が足りないと2列でも窮屈になるので、そこは素直に1列へ戻す */
+@media (max-width: 860px) {
+  .easy-cols { grid-template-columns:1fr; }
+  .easy-steps { grid-template-columns:1fr; }
+}
+
+/* 普段は畳んでおく箱。既定のまま進められるものを、常に開いて見せる必要はない */
+/* card の中に直接置くので、自前の枠は持たない */
+.easy-fold { margin:0; }
+.easy-fold > summary { cursor:pointer; padding:12px 14px; user-select:none;
+  font-size:12px; list-style:none; }
+.easy-fold > summary::-webkit-details-marker { display:none; }
+.easy-fold > summary::before { content:"\25B8"; display:inline-block;
+  margin-right:6px; transition:transform .12s; color:var(--faint); }
+.easy-fold[open] > summary::before { transform:rotate(90deg); }
+.easy-fold-body { padding:0 14px 14px; }
+.easy-fold-body .note { margin:0 0 8px; }
+.easy-radio { display:inline-flex; align-items:center; gap:5px; font-size:12px;
+  color:var(--muted); cursor:pointer; }
+.easy-radio input { margin:0; }
+/* 微調整のスライダー。ラベルと値を1行、その下にバー */
+.easy-tune { display:grid; grid-template-columns:1fr 1fr; gap:12px 18px; }
+.easy-knob > label { display:flex; align-items:center; gap:6px; margin:0 0 3px;
+  font-size:11px; color:var(--muted); }
+.easy-knob > label .v { color:var(--text); font-variant-numeric:tabular-nums;
+  min-width:30px; }
+.easy-knob > input[type=range] { width:100%; margin:0; display:block; }
+/* 書き方のコツ。表は横に溢れさせず、狭いときだけ横スクロールさせる */
+.easy-tips { margin:0 0 10px; padding-left:18px; font-size:11.5px; color:var(--muted); }
+.easy-tips li { margin:2px 0; }
+.easy-tips b { color:var(--text); font-weight:600; }
+.easy-tbl-wrap { overflow-x:auto; margin-bottom:8px; }
+.easy-tbl { border-collapse:collapse; font-size:11px; width:100%; }
+.easy-tbl th, .easy-tbl td { padding:3px 8px; text-align:left; white-space:nowrap;
+  border-bottom:1px solid var(--line); }
+.easy-tbl th { color:var(--faint); font-weight:500; }
+.easy-tbl td { color:var(--text); }
+.easy-tbl tr.bad td { color:var(--faint); }
+.easy-tbl .s5 { color:#e06c75; font-weight:600; }
+.easy-tbl .s4 { color:#d19a66; }
+.easy-tbl .s3 { color:var(--muted); }
+.easy-tbl .s1 { color:var(--faint); }
+.easy-ex-h { margin:10px 0 4px; font-size:11.5px; color:var(--text); }
+.easy-ex { margin:0 0 8px; padding-left:18px; font-size:11.5px; color:var(--muted); }
+.easy-ex li { margin:3px 0; }
+/* seed は行の余りに右寄せで置く。ここだけで1行使わない */
+.easy-seed-box { margin-left:auto; display:inline-flex; align-items:center; gap:6px; }
+.easy-seed-box > label { margin:0; font-size:11px; color:var(--faint); }
+/* 数字10桁が読める幅だけ取る */
+.easy-seed-in { width:118px; margin:0; }
+
+/* どちらへ動かすと何が起きるかを、つまみの両端に出す */
+.easy-ends { display:flex; justify-content:space-between; margin-top:2px;
+  font-size:10px; color:var(--faint); }

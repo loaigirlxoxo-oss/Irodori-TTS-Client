@@ -72,6 +72,13 @@ app = [
     "pydantic>=2.5",
     "python-multipart>=0.0.9",
     "silero-vad>=6.0",
+    # かんたん学習の参照ボイス微調整。Praat で高さとフォルマントを別々に
+    # 動かし、フィルタは scipy で掛ける。requirements.txt 側にも同じものが
+    # あるが、uv で作った環境にも要るのでここにも書く。
+    "praat-parselmouth>=0.4.7",
+    "scipy>=1.11",
+    # 話者の似ている度（ECAPA-TDNN）。素材の選別とチェックポイントの採用に使う。
+    "speechbrain>=1.0",
 ]
 
 [tool.uv]

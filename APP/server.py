@@ -6,7 +6,7 @@ warnings.filterwarnings("ignore", category=UserWarning)
 from pathlib import Path
 import os
 
-from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, Request
+from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.concurrency import run_in_threadpool
@@ -47,6 +47,7 @@ def listen_port() -> int:
             return port
     return 8080
 import server_dataset  # Dataset CRUD endpoints
+import server_easy  # かんたん学習（生成→データセット→学習→採用）
 import server_train  # LoRA training job management
 from data_paths import (outputs_dir, voices_metadata_path, migrate_legacy_voices,
                         manual_checkpoint, OPTIONAL_MODELS,
@@ -64,6 +65,7 @@ app = FastAPI(title="Irodori-TTS API")
 app.include_router(server_lora.router)
 app.include_router(server_audio.router)
 app.include_router(server_dataset.router)
+app.include_router(server_easy.router)
 app.include_router(server_train.router)
 
 app.add_middleware(
@@ -171,6 +173,20 @@ _VOICE_DESIGN_MODELS = frozenset({"voice_design", "v3_voice_design"})
 
 def is_voice_design_model(model_type: str) -> bool:
     return str(model_type) in _VOICE_DESIGN_MODELS
+
+
+# キャプション（どんな声かの説明）で声を指定できるモデル。
+#
+# VoiceDesign 専用の機能ではない。v4 系の設定は use_caption_condition: true で、
+# 重みにも caption 用の層が入っている（v4.1-Small で39個）。実測：同じ seed・
+# 同じ文でキャプションだけ変えると、ECAPA の類似度が 0.196 まで落ちる（別人）。
+#   「落ち着いた低めの女性の声」vs「とても高く幼い女の子の声」 -> 0.196
+# VoiceDesign と違い、v4 系はキャプション無しでも鳴るので必須ではない。
+_CAPTION_MODELS = frozenset({"v4_1", "v4_1_anime", "v4"})
+
+
+def accepts_caption(model_type: str) -> bool:
+    return is_voice_design_model(model_type) or str(model_type) in _CAPTION_MODELS
 
 
 # OpenAI 互換の口は steps や尺を受け取らない（OpenAI の仕様に無い）。
@@ -549,6 +565,24 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
             with open(temp_ref_path, "wb") as f:
                 f.write(await ref_wav.read())
             is_temp_file = True
+        elif isinstance(data.get("ref_wav"), str) and data["ref_wav"].strip():
+            # JSON でパスを渡す経路。multipart のアップロードと voice_id しか
+            # 見ていなかったため、パス文字列は黙って捨てられ、参照なしとして
+            # 生成されていた（かんたん学習がこの形で呼ぶ）。
+            candidate = Path(data["ref_wav"].strip())
+            # CORS を全開にしているので、任意の絶対パスを受けると外部ページから
+            # 「そこに音声があるか」「どんな声か」を引き出せてしまう。アプリが
+            # 自分で扱う場所の下だけ通す（server_easy と同じ規則）。
+            try:
+                candidate = server_easy._ensure_allowed(candidate)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code,
+                                    content={"error": exc.detail})
+            if not candidate.is_file():
+                return JSONResponse(status_code=400, content={
+                    "error": f"ref_wav not found: {candidate}",
+                })
+            temp_ref_path = candidate
         elif v_id:
             # Query metadata.json for the saved voice ID or name
             meta_path = voices_metadata_path()
@@ -560,71 +594,83 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
                         temp_ref_path = Path(v["path"])
                         break
 
-        # 学習中は GPU を明け渡さない。ここで生成すると学習側と同じ GPU に
-        # ベースモデルがもう一度載り、8GB 級では学習ジョブごと OOM で落ちる。
-        # UI は学習中の生成を止めているが、API を直に叩かれると素通りする。
-        job = server_train.active_job_id()
-        if job:
-            return JSONResponse(status_code=409, content={
-                "error": f"学習中です（job {job}）。終わるまで生成できません。",
-            })
+        # 学習中・かんたん学習中は GPU を明け渡さない。同じ GPU にベース
+        # モデルがもう一度載り、8GB 級では学習ごと OOM で落ちる。かんたん
+        # 学習と並べると、モデルの読み直しで5倍遅くなり、LoRA を切り替え
+        # られると素材に別の声が混ざる。
+        #
+        # 判定と「掴んだ」の登録は admit_runtime がまとめてロックの中で
+        # やる。ここで先に見ると、見てからロックを取るまでの間に相手が
+        # 始まったぶんが通ってしまう。合言葉つき（かんたん学習自身）は素通し。
+        try:
+            admission = server_easy.admit_runtime(
+                data.get("easy_token") if isinstance(data, dict) else None)
+        except HTTPException as exc:
+            return JSONResponse(status_code=exc.status_code,
+                                content={"error": exc.detail})
 
         # 初回はチェックポイントの読み込みで十数秒かかる。ここも
         # イベントループを塞がないように別スレッドへ出す。
-        runtime, _ = await run_in_threadpool(
-            resolve_and_load_model, model_type, precision, device)
-        is_voice_design = is_voice_design_model(model_type)
+        # 掴んでいる間はランタイムを手放させない。かんたん学習が工程の区切りで
+        # キャッシュを空にすると、その隙に来た生成が2つ目をGPUへ載せる。
+        with admission:
+            runtime, _ = await run_in_threadpool(
+                resolve_and_load_model, model_type, precision, device)
+            is_voice_design = is_voice_design_model(model_type)
 
-        req_kwargs = {
-            "text": text,
-            "ref_wav": str(temp_ref_path) if temp_ref_path else None,
-            "ref_latent": None,
-            "no_ref": temp_ref_path is None or is_voice_design,
-            "ref_normalize_db": -16.0,
-            "ref_ensure_max": True,
-            "num_candidates": num_candidates,
-            "decode_mode": "sequential",
-            "seconds": None,
-            "max_ref_seconds": 30.0,
-            "max_text_len": max_text_len,
-            "num_steps": num_steps,
-            "seed": seed,
-            "duration_scale": duration_scale,
+            req_kwargs = {
+                "text": text,
+                "ref_wav": str(temp_ref_path) if temp_ref_path else None,
+                "ref_latent": None,
+                "no_ref": temp_ref_path is None or is_voice_design,
+                "ref_normalize_db": -16.0,
+                "ref_ensure_max": True,
+                "num_candidates": num_candidates,
+                "decode_mode": "sequential",
+                "seconds": None,
+                "max_ref_seconds": 30.0,
+                "max_text_len": max_text_len,
+                "num_steps": num_steps,
+                "seed": seed,
+                "duration_scale": duration_scale,
 
-            "cfg_guidance_mode": cfg_guidance_mode,
-            "cfg_scale_text": cfg_scale_text,
-            "cfg_scale_speaker": cfg_scale_speaker,
-            "cfg_scale_caption": cfg_scale_caption,
-            "cfg_scale": cfg_scale,
-            "cfg_min_t": cfg_min_t,
-            "cfg_max_t": cfg_max_t,
+                "cfg_guidance_mode": cfg_guidance_mode,
+                "cfg_scale_text": cfg_scale_text,
+                "cfg_scale_speaker": cfg_scale_speaker,
+                "cfg_scale_caption": cfg_scale_caption,
+                "cfg_scale": cfg_scale,
+                "cfg_min_t": cfg_min_t,
+                "cfg_max_t": cfg_max_t,
 
-            "truncation_factor": truncation_factor,
-            "rescale_k": rescale_k,
-            "rescale_sigma": rescale_sigma,
+                "truncation_factor": truncation_factor,
+                "rescale_k": rescale_k,
+                "rescale_sigma": rescale_sigma,
 
-            "context_kv_cache": context_kv_cache,
-            "speaker_kv_scale": speaker_kv_scale,
-            "speaker_kv_min_t": speaker_kv_min_t,
-            "speaker_kv_max_layers": speaker_kv_max_layers,
+                "context_kv_cache": context_kv_cache,
+                "speaker_kv_scale": speaker_kv_scale,
+                "speaker_kv_min_t": speaker_kv_min_t,
+                "speaker_kv_max_layers": speaker_kv_max_layers,
 
-            "t_schedule_mode": t_schedule_mode,
-            "sway_coeff": sway_coeff,
+                "t_schedule_mode": t_schedule_mode,
+                "sway_coeff": sway_coeff,
 
-            "lora_adapter": lora_adapter_path,
+                "lora_adapter": lora_adapter_path,
 
-            "trim_tail": trim_tail,
-        }
+                "trim_tail": trim_tail,
+            }
 
-        if is_voice_design:
-            req_kwargs["caption"] = caption
-            req_kwargs["max_caption_len"] = max_caption_len
+            # v4 系もキャプションを解釈する。VoiceDesign と違って必須では
+            # ないので、書かれているときだけ渡す。VoiceDesign は空でも渡す
+            # （キャプション前提のモデルなので、無指定のまま鳴らさない）。
+            if accepts_caption(model_type) and (caption or is_voice_design):
+                req_kwargs["caption"] = caption
+                req_kwargs["max_caption_len"] = max_caption_len
 
-        request_obj = SamplingRequest(**req_kwargs)
-        # 生成は数秒〜十数秒ブロックする。async ハンドラから直に呼ぶと
-        # イベントループごと止まり、生成中は /status も含めて全エンドポイントが
-        # 応答しなくなる（UI からは画面が固まったように見える）。
-        result = await run_in_threadpool(runtime.synthesize, request_obj)
+            request_obj = SamplingRequest(**req_kwargs)
+            # 生成は数秒〜十数秒ブロックする。async ハンドラから直に呼ぶと
+            # イベントループごと止まり、生成中は /status も含めて全エンドポイントが
+            # 応答しなくなる（UI からは画面が固まったように見える）。
+            result = await run_in_threadpool(runtime.synthesize, request_obj)
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         out_urls = []
@@ -798,62 +844,66 @@ async def openai_audio_speech(request: Request):
 
     print(f"[OpenAI Speech] resolved -> model_type={model_type} lora={lora_name}", flush=True)
 
+    # 学習中・かんたん学習中は受け付けない。ネイティブの口だけ塞いでも、
+    # こちらから入られると同じことが起きる。判定と登録は admit_runtime が
+    # まとめてロックの中でやる。この口は外部向けで、内部の402本生成は
+    # 通らないので、合言葉は渡さない。
     try:
-        # 学習中は GPU を明け渡さない。ここで生成すると学習側と同じ GPU に
-        # ベースモデルがもう一度載り、8GB 級では学習ジョブごと OOM で落ちる。
-        # UI は学習中の生成を止めているが、API を直に叩かれると素通りする。
-        job = server_train.active_job_id()
-        if job:
-            return JSONResponse(status_code=409, content={
-                "error": f"学習中です（job {job}）。終わるまで生成できません。",
-            })
+        admission = server_easy.admit_runtime()
+    except HTTPException as exc:
+        return JSONResponse(status_code=exc.status_code,
+                            content={"error": exc.detail})
 
+    try:
         # OpenAI の仕様に精度を渡す口は無いので auto に任せる。ここだけ fp32
         # 固定にすると、同じ GPU なのにネイティブ API と結果が食い違う。
-        runtime, _ = await run_in_threadpool(
-            resolve_and_load_model, model_type, "auto")
-        defaults = cfg_defaults_for(model_type)
+        # 掴んでいる間はランタイムを手放させない。かんたん学習が工程の区切りで
+        # キャッシュを空にすると、その隙に来た生成が2つ目をGPUへ載せる。
+        with admission:
+            runtime, _ = await run_in_threadpool(
+                resolve_and_load_model, model_type, "auto")
+            defaults = cfg_defaults_for(model_type)
 
-        req_kwargs = {
-            "text": text,
-            "ref_wav": None,
-            "ref_latent": None,
-            "no_ref": True,
-            "ref_normalize_db": -16.0,
-            "ref_ensure_max": True,
-            "num_candidates": 1,
-            "decode_mode": "sequential",
-            # 尺は予測に任せる。30 秒を渡すと上限まで引き延ばされ、参照音声を
-            # 持たない話し方のみの LoRA でちょうど 30 秒の音が返っていた。
-            "seconds": None,
-            "duration_scale": OPENAI_DURATION_SCALE,
-            "max_ref_seconds": 30.0,
-            "max_text_len": None,
-            "num_steps": OPENAI_NUM_STEPS,
-            "seed": None,
-            "cfg_guidance_mode": "independent",
-            "lora_adapter": lora_adapter_path,
-            "cfg_scale_text": defaults["text"],
-            "cfg_scale_speaker": defaults["speaker"],
-            "cfg_scale_caption": 4.0,
-            "cfg_scale": None,
-            "cfg_min_t": 0.5,
-            "cfg_max_t": 1.0,
-            "truncation_factor": None,
-            "rescale_k": None,
-            "rescale_sigma": None,
-            "context_kv_cache": True,
-            "speaker_kv_scale": None,
-            "speaker_kv_min_t": 0.9,
-            "speaker_kv_max_layers": None,
-            "trim_tail": True,
-        }
+            req_kwargs = {
+                "text": text,
+                "ref_wav": None,
+                "ref_latent": None,
+                "no_ref": True,
+                "ref_normalize_db": -16.0,
+                "ref_ensure_max": True,
+                "num_candidates": 1,
+                "decode_mode": "sequential",
+                # 尺は予測に任せる。30 秒を渡すと上限まで引き延ばされ、参照音声を
+                # 持たない話し方のみの LoRA でちょうど 30 秒の音が返っていた。
+                "seconds": None,
+                "duration_scale": OPENAI_DURATION_SCALE,
+                "max_ref_seconds": 30.0,
+                "max_text_len": None,
+                "num_steps": OPENAI_NUM_STEPS,
+                "seed": None,
+                "cfg_guidance_mode": "independent",
+                "lora_adapter": lora_adapter_path,
+                "cfg_scale_text": defaults["text"],
+                "cfg_scale_speaker": defaults["speaker"],
+                "cfg_scale_caption": 4.0,
+                "cfg_scale": None,
+                "cfg_min_t": 0.5,
+                "cfg_max_t": 1.0,
+                "truncation_factor": None,
+                "rescale_k": None,
+                "rescale_sigma": None,
+                "context_kv_cache": True,
+                "speaker_kv_scale": None,
+                "speaker_kv_min_t": 0.9,
+                "speaker_kv_max_layers": None,
+                "trim_tail": True,
+            }
 
-        request_obj = SamplingRequest(**req_kwargs)
-        # 生成は数秒〜十数秒ブロックする。async ハンドラから直に呼ぶと
-        # イベントループごと止まり、生成中は /status も含めて全エンドポイントが
-        # 応答しなくなる（UI からは画面が固まったように見える）。
-        result = await run_in_threadpool(runtime.synthesize, request_obj)
+            request_obj = SamplingRequest(**req_kwargs)
+            # 生成は数秒〜十数秒ブロックする。async ハンドラから直に呼ぶと
+            # イベントループごと止まり、生成中は /status も含めて全エンドポイントが
+            # 応答しなくなる（UI からは画面が固まったように見える）。
+            result = await run_in_threadpool(runtime.synthesize, request_obj)
         
         if not result.audios:
             return JSONResponse(status_code=500, content={"error": "Generation failed"})

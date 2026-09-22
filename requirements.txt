@@ -25,3 +25,14 @@ torchdata>=0.11.0
 transformers>=5.12.1,<6
 tqdm>=4.67.3
 wandb>=0.17.0
+
+# 参照ボイスの微調整（かんたん学習タブ）。Praat の Change gender で高さと
+# フォルマントを別々に動かす。WORLD も試したが、分解して戻すだけで本人性が
+# 0.86 まで落ちた（Praat は 0.98）。外部バイナリは要らない。
+praat-parselmouth>=0.4.7
+scipy>=1.11
+
+# 話者の似ている度（ECAPA-TDNN）。かんたん学習が素材の選別と、学習後の
+# チェックポイントの採用に使う。モデル本体は APP/fetch_models.py が
+# models/ecapa へ落とす。
+speechbrain>=1.0

@@ -44,6 +44,19 @@ ADAPTER_SUBDIR = "adapter"
 # 実体をレジストリに置くしかなく、一覧に出すと利用者の LoRA に紛れる。
 # renderer.js の TR_PREVIEW_LORA と同じ値。
 PREVIEW_LORA_NAME = "_ckpt_preview"
+# かんたん学習は採用の評価で、この前置きに ~<ジョブID>~<連番> を付けた名前を
+# 使う。区切りが "~" なのは、利用者が付けられない文字だから（NAME_PATTERN は
+# 英数と _ - . 空白 と仮名漢字しか通さない）。"_" で区切ると、利用者が
+# _ckpt_preview_foo と名付けた LoRA まで一覧・削除・マージから消えて
+# UI から触れなくなる。
+_PREVIEW_STEP_PATTERN = re.compile(
+    rf"^{re.escape(PREVIEW_LORA_NAME)}~[0-9a-f]{{6,32}}~\d+$"
+)
+
+
+def is_preview_lora(name: str) -> bool:
+    """一時登録（Train タブの試聴 / かんたん学習の評価）かどうか。"""
+    return name == PREVIEW_LORA_NAME or bool(_PREVIEW_STEP_PATTERN.match(name))
 NAME_PATTERN = re.compile(r"^[A-Za-z0-9_\-\. 一-龥ぁ-んァ-ヶー]+$")
 
 # Which of the two ingredients -- voice (who) and style (how) -- an adapter
@@ -241,7 +254,7 @@ def list_loras() -> JSONResponse:
         # 確かめ直せるようにするため。
         # 先頭 _ をまとめて弾くと、利用者が _ab_official のように名付けた
         # 検証用まで一覧・削除・マージから消えて UI から復帰できなくなる。
-        if child.name == PREVIEW_LORA_NAME:
+        if is_preview_lora(child.name):
             continue
         adapter_dir = child / ADAPTER_SUBDIR
         if not is_lora_adapter_dir(adapter_dir):
