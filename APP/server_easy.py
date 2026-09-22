@@ -1011,6 +1011,31 @@ class TrainRequest(BaseModel):
     save_every: int | None = Field(None, ge=10)
 
 
+def _train_batch_size() -> tuple[int, int]:
+    """VRAM に合わせて学習のバッチを決める。(batch_size, 勾配の積み上げ回数)
+
+    実効バッチは 32 で揃える。小さいカードでは1回に載せる数を減らし、
+    そのぶん積み上げ回数を増やす。学習の中身は変えずに山だけ低くする。
+
+    段の切り方は、かんたん学習の実測（ピーク約11GB、うち学習の段が約7.7GB）
+    から引いた。足りないと Windows では共有メモリへ退避して極端に遅くなる。
+    """
+    total_gb = 0.0
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            total_gb = torch.cuda.get_device_properties(0).total_memory / (1024 ** 3)
+    except Exception:  # noqa: BLE001 - 取れなければ一番小さい設定で回す
+        total_gb = 0.0
+
+    if total_gb >= 15.0:
+        return 4, 8
+    if total_gb >= 11.0:
+        return 2, 16
+    return 1, 32
+
+
 def _q(name: str) -> str:
     """URL の1区画として安全な形にする。
 
@@ -1186,6 +1211,8 @@ def _run_train(easy_id: str, req: TrainRequest) -> None:
         rec = cfg.get("recommended", {})
         max_steps = req.max_steps or int(rec.get("max_steps") or 600)
         save_every = req.save_every or int(rec.get("save_every") or 100)
+        batch_size, accum = _train_batch_size()
+        status["batch_size"] = batch_size
 
         status.update(state="training", train_total=max_steps)
         _write_status(easy_id, status)
@@ -1198,8 +1225,8 @@ def _run_train(easy_id: str, req: TrainRequest) -> None:
             "preset": rec.get("preset") or "speaker_style",
             "max_steps": max_steps,
             "save_every": save_every,
-            "batch_size": 4,
-            "gradient_accumulation_steps": 8,
+            "batch_size": batch_size,
+            "gradient_accumulation_steps": accum,
         })
         train_id = job["job_id"]
         status["train_job"] = train_id

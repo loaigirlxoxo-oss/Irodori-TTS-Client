@@ -257,6 +257,10 @@ def transcribe(wav_path: str) -> str:
 # 読みが崩れているとみなす閾値。これを超えたら SIM が高くても使わない。
 CER_LIMIT = 0.10
 
+# 足切りで全滅したときに「SIM が同等」とみなす幅。実測でチェックポイント間の
+# SIM の幅は 0.023 程度しかなく、この範囲の上下は声質の差として聞き取れない。
+SIM_BAND = 0.02
+
 # 評価対象にする学習の進み具合。SIM/CER だけで選ぶと、時々まだ浅い
 # チェックポイントが当たってしまう。総ステップのここから先だけを見ることで
 # 構造的に防ぐ。
@@ -287,8 +291,18 @@ def pick_checkpoint(rows: list[dict], max_steps: int) -> dict:
         best = max(passed, key=lambda r: r["sim"])
         return dict(best, fallback=False)
 
-    final = max(late, key=lambda r: r["step"])
-    return dict(final, fallback=True)
+    # 全滅したときに「最後のもの」を選ぶと、読みが一番崩れたものが当たる
+    # ことがある（実測: 囁き声の LoRA で CER 0.319〜0.559 の中から最悪の
+    # 0.559 が選ばれた）。候補の中から選び直す。
+    #
+    # SIM の差は小さい。実測ではチェックポイント7本の幅が 0.776〜0.799 と
+    # 0.023 しかなく、この程度の差は誤差。そこで SIM が最良から SIM_BAND
+    # 以内のものを「同等」とみなし、その中で CER が最小のものを採る。
+    # 同点なら学習が進んでいるほうを採る。
+    top = max(r["sim"] for r in late)
+    near = [r for r in late if r["sim"] >= top - SIM_BAND]
+    best = min(near, key=lambda r: (r["cer"], -r["step"]))
+    return dict(best, fallback=True)
 
 
 def release_runtime() -> bool:
