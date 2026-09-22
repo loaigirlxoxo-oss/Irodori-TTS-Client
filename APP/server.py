@@ -189,6 +189,22 @@ def accepts_caption(model_type: str) -> bool:
     return is_voice_design_model(model_type) or str(model_type) in _CAPTION_MODELS
 
 
+def drop_cuda_cache() -> None:
+    """合成のあとに、確保したままの VRAM を返す。
+
+    PyTorch のアロケータは一度掴んだブロックを離さないので、続けて鳴らすと
+    使用量が伸びる（実測: 12本でベースライン +9.0GB。毎回返せば +2.7GB）。
+    返す分だけ確保し直すので 1本あたり +0.03秒 かかるが、かんたん学習の
+    402本のような連続生成では 6GB 以上の差になる。
+    """
+    try:
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+    except Exception:
+        pass
+
+
 # OpenAI 互換の口は steps や尺を受け取らない（OpenAI の仕様に無い）。
 # ネイティブ側の既定と同じものをここで一度だけ決める。
 OPENAI_NUM_STEPS = 40
@@ -671,14 +687,35 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
             # イベントループごと止まり、生成中は /status も含めて全エンドポイントが
             # 応答しなくなる（UI からは画面が固まったように見える）。
             result = await run_in_threadpool(runtime.synthesize, request_obj)
+            drop_cuda_cache()
 
         stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
         out_urls = []
 
+        # 作り直すための情報を wav に埋める。ファイルだけ残っていても、
+        # 同じ音をもう一度出せるようにするため（seed は画面にしか出ない）。
+        import wav_meta
+
+        meta = {
+            "seed": result.used_seed,
+            "model_type": model_type,
+            "text": text,
+            "caption": caption or None,
+            "lora_name": lora_name_raw or None,
+            "num_steps": num_steps,
+            "duration_scale": duration_scale,
+            # CFG は音を大きく変える。これが無いと seed だけ合わせても
+            # 同じ音にならない（実測: 既定値のずれで別人になった）。
+            "cfg_scale_text": cfg_scale_text,
+            "cfg_scale_speaker": cfg_scale_speaker,
+            "cfg_scale_caption": cfg_scale_caption if accepts_caption(model_type) else None,
+            "created_at": datetime.now().isoformat(timespec="seconds"),
+        }
         for i, audio in enumerate(result.audios, start=1):
             filename = f"sample_{stamp}_{i:03d}.wav"
             out_path = outputs_dir() / filename
             save_wav(out_path, audio.float(), result.sample_rate)
+            wav_meta.tag_wav(out_path, meta)
             out_urls.append(f"/api/v1/outputs/{filename}")
 
         if is_temp_file and temp_ref_path and temp_ref_path.exists():
@@ -691,6 +728,10 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
         return JSONResponse(content={
             "status": "success",
             "seed_used": result.used_seed,
+            # エンジンの seed は 63bit あり、JSON の数値のままでは JavaScript の
+            # 安全整数（2^53-1）を超えて丸められる（実測: 25 ずれて別の音に
+            # なった）。画面と入力欄はこちらの文字列を使う。
+            "seed_used_str": str(result.used_seed),
             "results": out_urls,
             "timings": timing_details
         })
@@ -904,6 +945,7 @@ async def openai_audio_speech(request: Request):
             # イベントループごと止まり、生成中は /status も含めて全エンドポイントが
             # 応答しなくなる（UI からは画面が固まったように見える）。
             result = await run_in_threadpool(runtime.synthesize, request_obj)
+            drop_cuda_cache()
         
         if not result.audios:
             return JSONResponse(status_code=500, content={"error": "Generation failed"})
