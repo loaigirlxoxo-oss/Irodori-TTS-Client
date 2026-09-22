@@ -71,6 +71,8 @@ function syncCaptionField(modelType) {
       ? 'このモデルは説明文で声を決めます。'
       : '書くと声が変わります。空のままでも鳴ります。参照音声と一緒にも使えます。';
   }
+  // 畳まれている間は高さが測れないので、出したここで測り直す。
+  if (!captionWrapper.classList.contains('hidden')) autoGrow(captionInput);
 }
 
 // v4 系（v4-Small と v4.1-Small）。v4.1 は duration predictor だけを
@@ -131,6 +133,9 @@ const statusBadge = document.getElementById('status-badge');
 const modelSelect = document.getElementById('model-type');
 const captionWrapper = document.getElementById('caption-wrapper');
 const captionInput = document.getElementById('caption-input');
+// 2 行に固定されていると、改行した先が枠の外へ出て、書いた文が消えたように
+// 見える。セリフ欄と同じように中身へ合わせて伸ばす。
+if (captionInput) captionInput.addEventListener('input', () => autoGrow(captionInput));
 const textInput = document.getElementById('text-input');
 
 const paramSteps = document.getElementById('param-steps');
@@ -216,6 +221,11 @@ function updateDurationEstimate() {
 }
 const paramCfgSpeaker = document.getElementById('param-cfg-speaker');
 const paramSeed = document.getElementById('param-seed');
+// text 型にしたぶん、数字以外は自分で落とす。貼り付けにも効かせる。
+if (paramSeed) paramSeed.addEventListener('input', () => {
+  const cleaned = paramSeed.value.replace(/[^0-9]/g, '');
+  if (cleaned !== paramSeed.value) paramSeed.value = cleaned;
+});
 
 const valSteps = document.getElementById('val-steps');
 const valCfgText = document.getElementById('val-cfg-text');
@@ -1233,6 +1243,7 @@ function addTake(no, srcText) {
     `<span class="src" title="${escapeHtmlAttr(srcText)}">${escapeHtml(srcText)}</span>` +
     `<canvas class="wave"></canvas>` +
     `<span class="len">生成中</span>` +
+    `<span class="seed"></span>` +
     `<span class="acts"></span>`;
   resultContainer.appendChild(el);
   updateResultPlaceholder();
@@ -1243,6 +1254,14 @@ function setTakeError(take, msg) {
   const len = take.querySelector('.len');
   if (len) { len.textContent = '失敗'; len.classList.add('ng'); }
   take.title = msg || '';
+}
+
+// 使われた seed。エンジンは 63bit を引くので、JSON の数値で受けると
+// JavaScript の安全整数（2^53-1）を超えて丸められる（実測: 25 ずれて別の音に
+// なった）。サーバが文字列でも返すので、あればそちらを使う。
+function usedSeed(json) {
+  if (json.seed_used_str != null) return String(json.seed_used_str);
+  return json.seed_used == null ? null : String(json.seed_used);
 }
 
 function fillTake(take, src, seed) {
@@ -1266,7 +1285,13 @@ function fillTake(take, src, seed) {
   audio.addEventListener('loadedmetadata', () => {
     if (isFinite(audio.duration)) len.textContent = `${audio.duration.toFixed(1)}s`;
   });
-  if (seed != null) take.title = `seed: ${seed}`;
+  // seed は控えるためのものなので、乗せないと読めないツールチップでは足りない。
+  // かんたん学習タブと同じように、画面に文字で出す。
+  if (seed != null) {
+    take.title = `seed: ${seed}`;
+    const sEl = take.querySelector('.seed');
+    if (sEl) sEl.textContent = `seed ${seed}`;
+  }
 
   // 波形。データセット側と同じ描き方を使う。
   const canvas = take.querySelector('.wave');
@@ -1399,7 +1424,9 @@ async function generateAudio() {
           modelType: modelSelect.value,
           caption: acceptsCaption(modelSelect.value)
             ? captionInput.value.trim() : null,
-          seed: paramSeed.value ? parseInt(paramSeed.value) : null,
+          // parseInt すると 19 桁が丸まる。そのまま文字列で渡し、
+          // 多倍長で読める Python 側に解釈させる。
+          seed: paramSeed.value.trim() || null,
         });
       } catch (e) {
         take.classList.remove('busy');
@@ -1436,10 +1463,10 @@ async function generateAudio() {
       }
 
       // 候補が複数のときは 1 本目をこの行に、残りは続けて並べる
-      fillTake(take, blobUrls[0] || `${API_ORIGIN}${json.results[0]}`, json.seed_used);
+      fillTake(take, blobUrls[0] || `${API_ORIGIN}${json.results[0]}`, usedSeed(json));
       for (let i = 1; i < json.results.length; i++) {
         const extra = addTake(`${lines[li].no}-${i + 1}`, lines[li].text);
-        fillTake(extra, blobUrls[i] || `${API_ORIGIN}${json.results[i]}`, json.seed_used);
+        fillTake(extra, blobUrls[i] || `${API_ORIGIN}${json.results[i]}`, usedSeed(json));
       }
     }
 

@@ -537,6 +537,13 @@ input[type="range"]::-webkit-slider-thumb {
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
 }
 .take .len { font-size:11px;color:var(--muted);font-variant-numeric:tabular-nums;flex-shrink:0; }
+/* 引いた seed。控えるための数字なので、乗せないと出ないツールチップでは
+   読めない。秒数の隣に文字で置く。 */
+.take .seed {
+  font-size:11px;color:var(--faint);font-variant-numeric:tabular-nums;flex-shrink:0;
+  user-select:text;cursor:text;
+}
+.take .seed:empty { display:none; }
 /* 失敗した行は色で示す。消さずに残して、どの行が駄目だったか分かるように */
 .take .len.ng { color:var(--ng); }
 .take .acts { display:flex;gap:1px;flex-shrink:0; }
@@ -636,6 +643,19 @@ input[type="text"], input[type="number"], input[type="search"], .glass-input {
   height:29px; padding:0 8px; font-size:12.5px;
 }
 textarea, .glass-textarea { height:auto; padding:8px 10px; font-size:14px; line-height:1.8; }
+/* 説明文の欄。地が黒、枠が --line だと輪郭がほとんど出ず、どこが入力欄か
+   分からない。ここだけ明るい線にして、額のあることを見せる。
+   高さは renderer.js の autoGrow が中身に合わせる。 */
+/* .editor textarea はセリフ欄のための規則で、枠も地も余白も消し、高さを
+   21px に固定している。説明文の欄まで巻き込むと、輪郭が出ないうえに
+   改行した先が枠の外へ出て、書いた文が消えたように見える。ここで戻す。
+   高さは renderer.js の autoGrow が中身に合わせて上書きする。 */
+#caption-input {
+  border:1px solid var(--line-2); background:var(--sunk);
+  padding:8px 10px; line-height:1.7;
+  height:auto; min-height:56px; overflow:hidden; resize:vertical;
+}
+#caption-wrapper > .cap { display:block; margin-bottom:5px; }
 /* option の色は指定しない。開いた一覧はブラウザが自前で描くので、
    color-scheme:dark（と main.js の nativeTheme）に任せるほうが確実。
    ここで色を決めると、閉じているときの表示にも同じ色が使われ、
