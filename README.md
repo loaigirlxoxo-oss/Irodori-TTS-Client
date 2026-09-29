@@ -12,6 +12,8 @@
 
 ### インストーラで入れる（おすすめ）
 
+簡単なので、こちらをおすすめします。
+
 [Releases](https://github.com/loaigirlxoxo-oss/Irodori-TTS-Client/releases) から
 `Irodori-TTS-Client-Setup-<版>.exe` をダウンロードして実行します。
 Python は同梱しているので、Python・Node.js・Git を別に入れる必要はありません。
