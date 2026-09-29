@@ -1,4 +1,4 @@
-# Irodori-TTS Client
+# Irodori-TTS Client App
 
 [Irodori-TTS](https://github.com/Aratako/Irodori-TTS)（Aratako 氏）に、音声合成・データセット作成・LoRA 学習・朗読を
 ひとつのウィンドウで扱える Electron アプリを載せたものです。
@@ -15,7 +15,7 @@
 簡単なので、こちらをおすすめします。
 
 [Releases](https://github.com/loaigirlxoxo-oss/Irodori-TTS-Client/releases) から
-`Irodori-TTS-Client-Setup-<版>.exe` をダウンロードして実行します。
+`Irodori-TTS-Client-App-Setup-<版>.exe` をダウンロードして実行します。
 Python は同梱しているので、Python・Node.js・Git を別に入れる必要はありません。
 
 1. インストーラを実行し、入れる場所を選んで「インストール」
@@ -26,6 +26,7 @@ Python は同梱しているので、Python・Node.js・Git を別に入れる�
 |-|-|
 | OS | Windows 10 / 11 |
 | GPU | NVIDIA 製を推奨（AMD は試験対応、GPU 無しでも CPU で動作） |
+| VRAM | 6〜12GB（生成・朗読は 6GB 以上、学習は 12GB 以上を推奨） |
 | 空き容量 | **45GB 以上を推奨**（環境 5.7GB ＋ モデル 30GB ＋ 作業領域） |
 
 ### ソースから入れる
@@ -49,13 +50,15 @@ git clone https://github.com/loaigirlxoxo-oss/Irodori-TTS-Client.git
 | Python | **3.10**（[3.10.11](https://www.python.org/downloads/release/python-31011/)）／AMD 使用時のみ 3.12 |
 | Node.js | LTS 版（[nodejs.org](https://nodejs.org/en/download)） |
 | Git | [Git for Windows](https://git-scm.com/install/windows) |
-| GPU | NVIDIA 製・VRAM 8GB 以上を推奨（AMD は試験対応、GPU 無しでも CPU で動作） |
+| GPU | NVIDIA 製を推奨（AMD は試験対応、GPU 無しでも CPU で動作） |
+| VRAM | 6〜12GB（生成・朗読は 6GB 以上、学習は 12GB 以上を推奨） |
 | 空き容量 | **45GB 以上を推奨**（環境 5.7GB ＋ モデル 30GB ＋ 作業領域） |
 
 かんたん学習タブだけは **VRAM 12GB 以上**を見てください。長い文（200文字程度）を
 鳴らす時点で合成に 8.5GB ほど要り、学習と採用の評価まで通すとピークが約 11GB でした
-（RTX 5080 での実測）。8GB だと途中で足りなくなる可能性があります。他のタブは
-8GB で確認しています。
+（RTX 5080 での実測）。8GB だと途中で足りなくなる可能性があります。生成と朗読は
+GTX 1060（6GB）で確認しています。ただし v4-Large の生成だけは VRAM を約7.6GB 使います
+（RTX 5080 での実測）。6GB の GPU では v4.1-Small など他のモデルを使ってください。
 
 Python は通常 **3.10** を使います。3.11 以降では `sentencepiece` の導入に失敗するためです。
 

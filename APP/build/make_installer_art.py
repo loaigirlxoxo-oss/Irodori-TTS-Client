@@ -60,13 +60,15 @@ def paste_mark(canvas: Image.Image, box: tuple[int, int, int, int]) -> None:
 def product_name() -> tuple[str, str]:
     """package.json の productName を2行に割る。
 
-    「Irodori-TTS Client」→（Irodori-TTS, Client）。空白が無ければ1行だけ。
+    「Irodori-TTS Client App」→（Irodori-TTS, Client App）。空白が無ければ1行だけ。
     リポジトリごとに名前が違うので、ここで読んで焼き込む。
     """
     with io.open(os.path.join(APP, "package.json"), encoding="utf-8") as f:
         name = json.load(f).get("build", {}).get("productName", "Irodori-TTS")
     if " " in name:
-        head, _, tail = name.rpartition(" ")
+        # 最初の空白で割る。最後で割ると3語の名前が「Irodori-TTS Client / App」になり、
+        # 1行目が 164px の幅からはみ出す。
+        head, _, tail = name.partition(" ")
         return head, tail
     return name, ""
 

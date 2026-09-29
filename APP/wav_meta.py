@@ -21,7 +21,7 @@ import json
 import struct
 from pathlib import Path
 
-_SOFTWARE = "Irodori-TTS Client"
+_SOFTWARE = "Irodori-TTS Client App"
 
 # 全項目を置く独自チャンク。RIFF の規約どおり4バイト。
 _FULL = b"IRDR"

@@ -23,8 +23,8 @@
   },
   "build": {
     "appId": "com.loaivoice.irodori-tts-client",
-    "productName": "Irodori-TTS Client",
-    "artifactName": "Irodori-TTS-Client-Setup-${version}.${ext}",
+    "productName": "Irodori-TTS Client App",
+    "artifactName": "Irodori-TTS-Client-App-Setup-${version}.${ext}",
     "directories": {
       "output": "../dist",
       "buildResources": "build"
@@ -119,7 +119,7 @@
       "perMachine": false,
       "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
-      "shortcutName": "Irodori-TTS Client",
+      "shortcutName": "Irodori-TTS Client App",
       "deleteAppDataOnUninstall": false
     }
   }
