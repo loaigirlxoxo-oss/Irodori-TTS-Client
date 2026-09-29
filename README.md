@@ -26,7 +26,7 @@ Python は同梱しているので、Python・Node.js・Git を別に入れる�
 |-|-|
 | OS | Windows 10 / 11 |
 | GPU | NVIDIA 製を推奨（AMD は試験対応、GPU 無しでも CPU で動作） |
-| 空き容量 | **45GB 以上**（環境 5.7GB ＋ モデル 30GB ＋ 作業領域） |
+| 空き容量 | **45GB 以上を推奨**（環境 5.7GB ＋ モデル 30GB ＋ 作業領域） |
 
 ### ソースから入れる
 
@@ -50,7 +50,7 @@ git clone https://github.com/loaigirlxoxo-oss/Irodori-TTS-Client.git
 | Node.js | LTS 版（[nodejs.org](https://nodejs.org/en/download)） |
 | Git | [Git for Windows](https://git-scm.com/install/windows) |
 | GPU | NVIDIA 製・VRAM 8GB 以上を推奨（AMD は試験対応、GPU 無しでも CPU で動作） |
-| 空き容量 | **45GB 以上**（環境 5.7GB ＋ モデル 30GB ＋ 作業領域） |
+| 空き容量 | **45GB 以上を推奨**（環境 5.7GB ＋ モデル 30GB ＋ 作業領域） |
 
 かんたん学習タブだけは **VRAM 12GB 以上**を見てください。長い文（200文字程度）を
 鳴らす時点で合成に 8.5GB ほど要り、学習と採用の評価まで通すとピークが約 11GB でした
