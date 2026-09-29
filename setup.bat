@@ -15,7 +15,7 @@ echo.
 echo  このスクリプトは以下を構築します。
 echo    1. Node パッケージ       (APP\node_modules)
 echo    2. Python 環境           (.venv)
-echo    3. 音声モデル            (約 17GB)
+echo    3. 音声モデル            (約 30GB)
 echo.
 echo  初回は 30～60 分ほどかかります（回線速度による）。
 echo.
@@ -26,17 +26,6 @@ if errorlevel 1 (
   echo [エラー] npm が見つかりません。
   echo         Node.js LTS を入れてから再実行してください。
   echo         https://nodejs.org/
-  goto :fail
-)
-
-REM requirements.txt の dacvae と silentcipher は git+https で取得する。
-REM git が無いと pip の途中で分かりにくいエラーになるので、先に弾く。
-where git >nul 2>nul
-if errorlevel 1 (
-  echo [エラー] git が見つかりません。
-  echo         一部のライブラリを GitHub から取得するため必要です。
-  echo         Git for Windows を入れてから再実行してください。
-  echo         https://git-scm.com/download/win
   goto :fail
 )
 
@@ -128,7 +117,6 @@ goto :fail
 :py_done
 
 echo [確認] npm    : OK
-echo [確認] git    : OK
 echo [確認] Python : %PYLAUNCH%
 echo.
 
@@ -277,7 +265,7 @@ REM ---------- 3. モデルの取得 ----------
 REM 取得しておかないと初回生成時に数分間、無反応に見える。
 REM ここで落としておけば進捗が見える状態で待てる。
 echo ----------------------------------------------
-echo  [3/3] 音声モデルを取得します（約 17GB）...
+echo  [3/3] 音声モデルを取得します（約 30GB）...
 echo ----------------------------------------------
 echo  ※ 途中で止めても、再実行すれば続きから取得します。
 call ".venv\Scripts\python.exe" APP\fetch_models.py

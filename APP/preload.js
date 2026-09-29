@@ -18,6 +18,8 @@ contextBridge.exposeInMainWorld('api', {
   openTextFile: () => ipcRenderer.invoke('open-text-file'),
   saveSynthOutput: (arg) => ipcRenderer.invoke('save-synth-output', arg),
   selectSaveFolder: () => ipcRenderer.invoke('select-save-folder'),
+  getOutputsDir: () => ipcRenderer.invoke('get-outputs-dir'),
+  openSaveFolder: (folder) => ipcRenderer.invoke('open-save-folder', folder),
   readTextFile: (filePath) => ipcRenderer.invoke('read-text-file', filePath),
   // 青空文庫
   aozoraCatalogStatus: () => ipcRenderer.invoke('aozora-catalog-status'),
@@ -25,6 +27,13 @@ contextBridge.exposeInMainWorld('api', {
   aozoraSearch: (keyword) => ipcRenderer.invoke('aozora-search', keyword),
   aozoraByUrl: (url) => ipcRenderer.invoke('aozora-by-url', url),
   aozoraDownload: (arg) => ipcRenderer.invoke('aozora-download', arg),
+  aozoraPreview: (arg) => ipcRenderer.invoke('aozora-preview', arg),
   // 保存済みテキストの一覧（青空文庫・朗読タブが使う）
   getSavedNovels: () => ipcRenderer.invoke('get-saved-novels')
+});
+
+// 初回起動の画面（setup.html）だけが使う。進捗と失敗を受け取る。
+contextBridge.exposeInMainWorld('irodoriSetup', {
+  onProgress: (fn) => ipcRenderer.on('setup-progress', (_e, p) => fn(p)),
+  onError: (fn) => ipcRenderer.on('setup-error', (_e, m) => fn(m))
 });

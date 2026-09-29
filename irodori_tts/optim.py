@@ -153,7 +153,11 @@ def _partition_adamw_params(
 
 def _partition_muon_params(
     model: torch.nn.Module,
+    *,
+    pretrained_optimizer: str,
 ) -> tuple[
+    list[torch.nn.Parameter],
+    list[torch.nn.Parameter],
     list[torch.nn.Parameter],
     list[torch.nn.Parameter],
     list[torch.nn.Parameter],
@@ -169,24 +173,40 @@ def _partition_muon_params(
     muon_no_decay: list[torch.nn.Parameter] = []
     aux_decay: list[torch.nn.Parameter] = []
     aux_no_decay: list[torch.nn.Parameter] = []
-    pretrained_decay: list[torch.nn.Parameter] = []
-    pretrained_no_decay: list[torch.nn.Parameter] = []
+    pretrained_muon_decay: list[torch.nn.Parameter] = []
+    pretrained_muon_no_decay: list[torch.nn.Parameter] = []
+    pretrained_aux_decay: list[torch.nn.Parameter] = []
+    pretrained_aux_no_decay: list[torch.nn.Parameter] = []
+    embedding_param_ids = {
+        id(parameter)
+        for module in model.modules()
+        if isinstance(module, torch.nn.Embedding)
+        for parameter in module.parameters(recurse=False)
+    }
     for name, p in model.named_parameters():
         if not p.requires_grad:
             continue
         has_decay = _use_weight_decay(name, p)
+        is_pretrained_muon_candidate = (
+            p.ndim == 2
+            and id(p) not in embedding_param_ids
+            and not name.endswith("out_proj.weight")
+        )
         if _is_pretrained_text_backbone_parameter(name):
-            # Fine-tune every pretrained-backbone parameter with AdamW. Muon's
-            # matrix update is intentionally not mixed into the same backbone.
-            if has_decay:
-                pretrained_decay.append(p)
+            if pretrained_optimizer == "muon" and is_pretrained_muon_candidate:
+                if has_decay:
+                    pretrained_muon_decay.append(p)
+                else:
+                    pretrained_muon_no_decay.append(p)
+            elif has_decay:
+                pretrained_aux_decay.append(p)
             else:
-                pretrained_no_decay.append(p)
+                pretrained_aux_no_decay.append(p)
             continue
         # Muon is intended for hidden matrix-like weights.
         # Keep embeddings/output heads/bias-like params on Adam.
         is_muon_candidate = (
-            p.ndim >= 2 and "embedding" not in name and not name.endswith("out_proj.weight")
+            p.ndim == 2 and "embedding" not in name and not name.endswith("out_proj.weight")
         )
         if is_muon_candidate:
             if has_decay:
@@ -203,8 +223,10 @@ def _partition_muon_params(
         muon_no_decay,
         aux_decay,
         aux_no_decay,
-        pretrained_decay,
-        pretrained_no_decay,
+        pretrained_muon_decay,
+        pretrained_muon_no_decay,
+        pretrained_aux_decay,
+        pretrained_aux_no_decay,
     )
 
 
@@ -229,6 +251,16 @@ def _append_param_group(
 
 def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
     opt_name = cfg.optimizer.lower()
+    pretrained_opt_name = cfg.pretrained_text_encoder_optimizer.lower()
+    if pretrained_opt_name not in {"adamw", "muon"}:
+        raise ValueError(
+            "pretrained_text_encoder_optimizer must be one of ['adamw', 'muon'], "
+            f"got {cfg.pretrained_text_encoder_optimizer!r}"
+        )
+    if pretrained_opt_name == "muon" and opt_name != "muon":
+        raise ValueError(
+            "pretrained_text_encoder_optimizer='muon' requires optimizer='muon'."
+        )
     if opt_name == "adamw":
         decay, no_decay, pretrained_decay, pretrained_no_decay = _partition_adamw_params(model)
         param_groups: list[dict] = []
@@ -284,9 +316,14 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
             muon_no_decay,
             aux_decay,
             aux_no_decay,
-            pretrained_decay,
-            pretrained_no_decay,
-        ) = _partition_muon_params(model)
+            pretrained_muon_decay,
+            pretrained_muon_no_decay,
+            pretrained_aux_decay,
+            pretrained_aux_no_decay,
+        ) = _partition_muon_params(
+            model,
+            pretrained_optimizer=pretrained_opt_name,
+        )
         muon_param_groups: list[dict] = []
         _append_param_group(
             muon_param_groups,
@@ -301,6 +338,20 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
             weight_decay=0.0,
             learning_rate=cfg.learning_rate,
             group_name="main_muon_no_decay",
+        )
+        _append_param_group(
+            muon_param_groups,
+            pretrained_muon_decay,
+            weight_decay=cfg.weight_decay,
+            learning_rate=cfg.pretrained_text_encoder_learning_rate,
+            group_name="pretrained_text_encoder_muon_decay",
+        )
+        _append_param_group(
+            muon_param_groups,
+            pretrained_muon_no_decay,
+            weight_decay=0.0,
+            learning_rate=cfg.pretrained_text_encoder_learning_rate,
+            group_name="pretrained_text_encoder_muon_no_decay",
         )
         if not muon_param_groups:
             raise ValueError("No Muon-compatible parameters found for optimizer=muon.")
@@ -330,14 +381,14 @@ def build_optimizer(model: torch.nn.Module, cfg: TrainConfig):
         )
         _append_param_group(
             aux_param_groups,
-            pretrained_decay,
+            pretrained_aux_decay,
             weight_decay=cfg.weight_decay,
             learning_rate=cfg.pretrained_text_encoder_learning_rate,
             group_name="pretrained_text_encoder_decay",
         )
         _append_param_group(
             aux_param_groups,
-            pretrained_no_decay,
+            pretrained_aux_no_decay,
             weight_decay=0.0,
             learning_rate=cfg.pretrained_text_encoder_learning_rate,
             group_name="pretrained_text_encoder_no_decay",

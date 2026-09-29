@@ -19,6 +19,8 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.append(str(PROJECT_ROOT))
 
+from data_paths import models_root
+
 
 def _server_module():
     """実行中の server モジュール。
@@ -46,7 +48,7 @@ def _server_module():
 # ECAPA は話者照合そのもののモデルで、ここでの判断に直接効く。
 # setup が取得済みのものを使い、取りに行かない。
 
-ECAPA_DIR = PROJECT_ROOT / "models" / "ecapa"
+ECAPA_DIR = models_root() / "ecapa"
 ECAPA_SAMPLE_RATE = 16000
 
 _ecapa = None

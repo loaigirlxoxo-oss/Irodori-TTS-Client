@@ -13,6 +13,8 @@ a combined trained limit of 120 seconds.
   reconstruct the trained encoder without loading the original ModernBERT weights.
 - v4-Small includes its duration predictor and estimates output length automatically when
   `--seconds` is omitted.
+- MeanFlow checkpoints are selected automatically from `flow_parameterization` metadata and
+  default to four sampling steps.
 - Released v2/v3 checkpoints remain supported for inference. v2 checkpoints use fixed
   30-second targets; v3 base and VoiceDesign checkpoints include duration prediction.
 - Legacy v2 VoiceDesign is caption-only. Legacy v3 VoiceDesign and v4-Small support
@@ -96,7 +98,7 @@ by `--duration-scale`. If it does not, the runtime falls back to 30 seconds.
 
 | Parameter | Default | Notes |
 |-----------|---------|-------|
-| `--num-steps` | `40` | Number of Euler integration steps. Higher values are slower and can improve stability up to a point. |
+| `--num-steps` | `40` (RF), `4` (MeanFlow) | Number of sampling steps. |
 | `--t-schedule-mode` | `linear` | Timestep schedule for RF Euler sampling. Use `sway` to enable Sway Sampling. |
 | `--sway-coeff` | `-1.0` | Sway Sampling coefficient. Negative values allocate more schedule resolution to the noise side. |
 | `--num-candidates` | `1` | Number of candidates generated in one batched sampling pass. Higher values increase VRAM use. |
@@ -105,9 +107,8 @@ by `--duration-scale`. If it does not, the runtime falls back to 30 seconds.
 | `--truncation-factor` | `None` | Scales the initial Gaussian noise before sampling. Values such as `0.8` or `0.9` can reduce variation, but may also reduce expressiveness. |
 | `--rescale-k` / `--rescale-sigma` | `None` | Temporal score rescaling parameters. Set both together or leave both unset. |
 
-`--num-steps` is usually the first quality/speed knob to try. For quick experiments,
-lower values can be acceptable; for final samples, start from the default before making
-other changes.
+`--num-steps` is usually the first quality/speed knob to try. RF checkpoints should start from
+the default before making other changes.
 
 For lower-latency experiments, try Sway Sampling with fewer steps:
 
@@ -144,6 +145,11 @@ inference can enable text, speaker, and caption CFG at the same time.
 conditional branch plus one joint unconditional branch during CFG steps, so it is 2x
 NFE. `alternating` also uses one unconditional branch per CFG step, so it is 2x NFE,
 but alternates which condition is dropped at each step.
+
+MeanFlow checkpoints do not evaluate runtime CFG branches. Their text, caption, and speaker
+guidance was fused into the teacher target during distillation, so CFG scales, guidance mode,
+and CFG time bounds are ignored. Applying runtime CFG again would change the trained inference
+contract.
 
 Increasing a CFG scale can improve adherence to that condition, but very high values may
 make speech less natural. If pronunciation is weak, try increasing `--cfg-scale-text`
@@ -188,6 +194,11 @@ a reference waveform.
 For CUDA inference, `bf16` can reduce memory use and improve speed on supported GPUs.
 For CPU or MPS, `fp32` is the safer default. `--compile-model` is most useful when
 running many requests with similar shapes.
+
+When a compatible `flash_attn_interface` installation and GPU kernel are available, masked
+attention uses FlashAttention-3 automatically. Unsupported devices or wheels fall back to PyTorch
+SDPA. Set `IRODORI_ATTENTION_BACKEND=sdpa` to force the fallback for troubleshooting or numerical
+comparisons.
 
 ### Tail Trimming and Timings
 
@@ -282,9 +293,11 @@ The v2 configs use fixed 30-second targets. v4-Small and the variable-length v3 
 | `allow_tf32` / `--tf32` | `False` | Enables TF32 CUDA kernels for speed. |
 | `compile_model` / `--compile-model` | `False` | Enables `torch.compile` during training. |
 | `gradient_checkpointing` / `--gradient-checkpointing` | `False` | Enables activation checkpointing on diffusion blocks and, when supported, a trainable pretrained text encoder. Reduces memory usage at the cost of extra compute. |
+| `gradient_checkpointing_store_every` | `0` | With diffusion-block checkpointing enabled, keeps activations for one out of every N blocks to reduce recomputation. `0` checkpoints every block. Configured through YAML. |
 | `optimizer` / `--optimizer` | `muon` | `muon` or `adamw`. |
 | `learning_rate` / `--lr` | `1e-4` | Base learning rate. |
-| `pretrained_text_encoder_learning_rate` / `--pretrained-text-encoder-learning-rate` | `1e-5` | AdamW learning rate for a trainable pretrained text/caption backbone. It receives the same scheduler multiplier as the main LR and should be tuned for the selected backbone. |
+| `pretrained_text_encoder_learning_rate` / `--pretrained-text-encoder-learning-rate` | `1e-5` | Learning rate for a trainable pretrained text/caption backbone. It receives the same scheduler multiplier as the main LR and should be tuned for the selected backbone. |
+| `pretrained_text_encoder_optimizer` / `--pretrained-text-encoder-optimizer` | `adamw` | Optimizer for pretrained-backbone hidden matrices: `adamw` or `muon`. Muon requires the main `optimizer` to also be `muon`; embeddings, norms, and biases remain on AdamW. |
 | `weight_decay` / `--weight-decay` | `0.01` | Weight decay for optimizer groups that use it. |
 | `adam_beta1`, `adam_beta2`, `adam_eps` | `0.9`, `0.999`, `1e-8` | AdamW hyperparameters. |
 | `muon_momentum` / `--muon-momentum` | `0.95` | Momentum used by Muon. |
@@ -297,11 +310,12 @@ The v2 configs use fixed 30-second targets. v4-Small and the variable-length v3 
 The v4-Small and full-training v3 example configs use `optimizer: muon` and
 `lr_scheduler: wsd`.
 When changing effective batch size, revisit the learning rate and warmup length together.
-During full training, all pretrained-backbone parameters use a dedicated AdamW group, including
-matrix weights that would otherwise be assigned to Muon. The remaining TTS model keeps the
-selected main optimizer. During LoRA training, PEFT freezes base parameters and saves only LoRA
-weights plus explicitly selected `modules_to_save`; LoRA can therefore also be used with a
-pretrained text encoder.
+During full training, pretrained-backbone parameters use dedicated groups with their own learning
+rate. They use AdamW by default. With `pretrained_text_encoder_optimizer: muon`, compatible hidden
+matrices use Muon while embeddings, norms, and biases remain on AdamW. The remaining TTS model
+keeps the selected main optimizer. During LoRA training, PEFT freezes base parameters and saves
+only LoRA weights plus explicitly selected `modules_to_save`; LoRA can therefore also be used with
+a pretrained text encoder.
 
 ### Condition Dropout and Timesteps
 
@@ -317,6 +331,44 @@ pretrained text encoder.
 Condition dropout is required for classifier-free guidance to work at inference time.
 Very low dropout can weaken CFG behavior; very high dropout can reduce conditioning
 quality.
+
+### MeanFlow Distillation
+
+Set `train_mode: meanflow_distill` and `model.flow_parameterization: meanflow` to distill a
+compatible RF checkpoint. New runs initialize both teacher and student from `teacher_checkpoint`;
+`--init-checkpoint` is unnecessary. Use `--resume` to continue a MeanFlow training run.
+
+| Parameter / Field | Default in dataclass | Notes |
+|-------------------|----------------------|-------|
+| `teacher_checkpoint` | `None` | Local RF `.pt` or `.safetensors` checkpoint used to initialize the frozen teacher and MeanFlow student. Required for a new distillation run. |
+| `teacher_steps` | `40` | Euler substeps per sampled teacher interval. |
+| `meanflow_anchor_prob` | `0.5` | Probability of a zero-length interval using the analytic RF velocity target. |
+| `meanflow_time_logit_mean` / `meanflow_time_logit_std` | `0.4` / `1.0` | Logit-normal endpoint distribution in Irodori's `t=0` data, `t=1` noise convention. |
+| `meanflow_adaptive_weight_power` / `meanflow_adaptive_weight_eps` | `0.5` / `0.001` | Detached per-utterance adaptive loss weighting. |
+| `meanflow_cfg_text_scale` | `3.0` | Text CFG fused into the teacher trajectory. |
+| `meanflow_cfg_caption_scale` | `4.0` | Caption CFG fused into the teacher trajectory. |
+| `meanflow_cfg_speaker_scale` | `5.0` | Speaker CFG fused into the teacher trajectory. |
+| `meanflow_cfg_min_t` / `meanflow_cfg_max_t` | `0.5` / `1.0` | Teacher timestep range where CFG is active. |
+| `meanflow_teacher_chunk_size` | `8` | Maximum number of non-anchor samples sharing one reusable FP32 teacher KV cache. Smaller values reduce peak VRAM and increase calls. |
+| `meanflow_teacher_branch_batch_size` | `1` | Number of active dropped-condition branches evaluated in one teacher call; valid values are 1–3. |
+| `meanflow_teacher_fuse_base_branch` | `False` | Evaluates the base branch together with the first dropped-condition group. The supplied v4.1 recipe enables it. |
+| `meanflow_compile_teacher` | `False` | Optionally compiles the frozen teacher DiT. Disabled by default because varying packed batch sizes may trigger recompilation. |
+| `meanflow_teacher_device_offset` | `0` | `0` shares each student GPU; a positive offset pairs each local student rank with another visible GPU. |
+
+The supplied `configs/train_v4_small_meanflow.yaml` sets teacher chunk size to `24`, branch batch
+size to `3`, and base-branch fusion to `true`. The table above lists dataclass defaults; the
+[MeanFlow guide](meanflow.md#main-configuration-fields) lists the supplied config values.
+
+MeanFlow trains the entire student DiT, including its interval-length embedding. Condition encoders
+and the duration predictor are frozen. Condition dropout is configurable: the supplied config
+uses `text_condition_dropout: 0.0`, `speaker_condition_dropout: 0.1`, and
+`caption_condition_dropout: 0.1`. Validation uses the same teacher-generated targets and loss
+as training.
+
+On resume, chunk size, branch batch size, compilation, and device placement can change. The
+training code requires the saved teacher checkpoint path, teacher steps, time distribution,
+anchor probability, CFG, loss, and condition-dropout settings to match the current config.
+See the [MeanFlow guide](meanflow.md) for training and inference examples.
 
 ### VoiceDesign and Caption Warmup
 
@@ -358,7 +410,7 @@ AdamW parameter group.
 | Parameter / Field | Default in dataclass | Notes |
 |-------------------|----------------------|-------|
 | `use_duration_predictor` | `False` | Enables duration prediction in the model. |
-| `train_mode` / `--train-mode` | `rf` | `rf` trains the RF model; `duration_only` freezes non-duration parameters and trains only the duration predictor. |
+| `train_mode` / `--train-mode` | `rf` | `rf` trains the RF model; `duration_only` freezes non-duration parameters and trains only the duration predictor; `meanflow_distill` runs frozen-teacher MeanFlow distillation. |
 | `duration_loss_weight` / `--duration-loss-weight` | `0.1` | Weight of duration loss when training jointly with RF loss. |
 | `duration_backprop_to_condition` / `--duration-backprop-to-condition` | `False` | In joint `train_mode: rf`, allows duration loss to update text/caption projectors and the speaker condition path. `duration_only` always detaches these condition states. |
 | `duration_speaker_dropout` / `--duration-speaker-dropout` | `0.1` | Dropout for speaker features in duration prediction. |
@@ -366,12 +418,12 @@ AdamW parameter group.
 | `duration_huber_delta` / `--duration-huber-delta` | `0.1` | Huber delta for the log-duration regression loss. |
 | `duration_architecture` | `token_sum_adarn_zero_no_aux` | Duration predictor architecture. v4-Small uses `token_sum_dual_adarn_zero_no_aux`. |
 | `duration_hidden_dim`, `duration_layers`, `duration_dropout` | `1024`, `3`, `0.1` | Duration predictor residual SwiGLU width, depth, and dropout. |
-| `duration_attention_heads` | `8` | Attention heads used by pooled duration variants. It is kept in config for shared DP construction; the token-sum phase2 config does not use pooling attention. |
+| `duration_attention_heads` | `8` | Attention heads used by pooled duration predictor variants. |
 | `duration_speaker_fusion` | `adarn_zero` | Speaker conditioning mode. `token_sum_adarn_zero_no_aux` requires `adarn_zero`. |
 | `duration_caption_fusion` | `adarn_zero` | Caption conditioning mode for duration prediction. `token_sum_dual_adarn_zero_no_aux` requires `adarn_zero`. |
 | `duration_caption_pooling` | `masked_mean` | Caption pooling strategy used before caption-conditioned duration fusion. |
 | `duration_token_init_frames` | `9.0` | Initial frames-per-token for token-sum duration heads. Initial predictions are roughly `valid_token_count * duration_token_init_frames`. |
-| `duration_aux_dim` | `14` | Size of auxiliary duration features produced by the dataset pipeline. Token-sum no-aux models validate/pass this tensor for pipeline compatibility but do not use it in the prediction. |
+| `duration_aux_dim` | `14` | Size of auxiliary duration features produced by the dataset pipeline. Used only by duration architectures that consume auxiliary features. |
 
 The duration target is `log1p(num_frames)` and the runtime converts predictions back to
 latent frames for inference. v4-Small and the v3 releases use this predictor as an
@@ -494,13 +546,13 @@ use speaker/reference conditioning.
 
 ## Tuning Recipes
 
-### Better Text Adherence
+### Better Text Adherence (RF)
 
 Start with the default `--num-steps 40`. If pronunciation or text following is weak,
 try a slightly higher `--cfg-scale-text`. If artifacts increase, back off the scale
 before increasing other guidance values.
 
-### Stronger Speaker Similarity
+### Stronger Speaker Similarity (RF)
 
 Use clean reference audio and keep `--ref-normalize-db` enabled. With v4-Small, first try
 multiple shorter clips from the same speaker totaling approximately 30 seconds. Then try increasing

@@ -5,6 +5,7 @@ warnings.filterwarnings("ignore", category=FutureWarning)
 warnings.filterwarnings("ignore", category=UserWarning)
 from pathlib import Path
 import os
+import tempfile
 
 from fastapi import FastAPI, UploadFile, File, Form, BackgroundTasks, Request, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
@@ -49,7 +50,7 @@ def listen_port() -> int:
 import server_dataset  # Dataset CRUD endpoints
 import server_easy  # かんたん学習（生成→データセット→学習→採用）
 import server_train  # LoRA training job management
-from data_paths import (outputs_dir, voices_metadata_path, migrate_legacy_voices,
+from data_paths import (data_root, outputs_dir, voices_metadata_path, migrate_legacy_voices,
                         manual_checkpoint, OPTIONAL_MODELS,
                         missing_optional_model_message)
 
@@ -94,6 +95,12 @@ MODELS = {
     # 上流ではないので setup.bat の取得対象には含めない。使いたい人が自分で
     # 取得する前提で、置いていなければ選んだ時点でエラーになる。
     "v4_1_anime": "phasefield-audio/Irodori-TTS-v4.1-Anime",
+    # v4-Large（3.29B）。テキストエンコーダが T5Gemma 2 に替わった別の作り。
+    # T5Gemma の重みは model.safetensors に同梱、トークナイザは同じリポジトリの
+    # tokenizer/ に入っている。これがあれば gated の google/t5gemma-2-1b-1b には
+    # 取りに行かない（inference_runtime._resolve_tokenizer_source）。
+    # bf16 で VRAM の山 7.6 GiB、40 ステップで約 15 秒（RTX 5080 で実測）。
+    "v4_large": "Aratako/Irodori-TTS-v4-Large",
 }
 
 def _resolve_checkpoint(repo_id: str) -> str:
@@ -134,6 +141,8 @@ _CFG_DEFAULTS = {
     "v4_1": {"text": 3.0, "speaker": 5.0},
     # Anime は v4.1-Small の追加学習なので条件づけの作りは同じ。
     "v4_1_anime": {"text": 3.0, "speaker": 5.0},
+    # モデルカードの既定は text CFG 3.0。話者の値は書かれていないので v4 系に揃える。
+    "v4_large": {"text": 3.0, "speaker": 5.0},
     "_": {"text": 2.0, "speaker": 3.0},
 }
 
@@ -161,6 +170,23 @@ def is_lora_compatible(lora_base: str, model_type: str) -> bool:
     return any(pair <= group for group in _BASE_ALIASES)
 
 
+# 画面と同じ呼び名。エラー文に内部の名前（v4_1 など）を出さないため。
+MODEL_LABELS = {
+    "v4_1": "v4.1-Small",
+    "v4_1_anime": "v4.1-Anime",
+    "v4": "v4-Small",
+    "v4_large": "v4-Large",
+    "v3": "v3",
+    "v2": "v2",
+    "v3_voice_design": "v3 Voice Design",
+    "voice_design": "v2 Voice Design",
+}
+
+
+def model_label(model_type: str) -> str:
+    return MODEL_LABELS.get(str(model_type), str(model_type))
+
+
 def cfg_defaults_for(model_type: str) -> dict:
     """Guidance scales a model expects when the caller does not say."""
     return _CFG_DEFAULTS.get(model_type, _CFG_DEFAULTS["_"])
@@ -182,7 +208,8 @@ def is_voice_design_model(model_type: str) -> bool:
 # 同じ文でキャプションだけ変えると、ECAPA の類似度が 0.196 まで落ちる（別人）。
 #   「落ち着いた低めの女性の声」vs「とても高く幼い女の子の声」 -> 0.196
 # VoiceDesign と違い、v4 系はキャプション無しでも鳴るので必須ではない。
-_CAPTION_MODELS = frozenset({"v4_1", "v4_1_anime", "v4"})
+# v4-Large も use_caption_condition: true（チェックポイントの設定で確認）。
+_CAPTION_MODELS = frozenset({"v4_1", "v4_1_anime", "v4", "v4_large"})
 
 
 def accepts_caption(model_type: str) -> bool:
@@ -347,6 +374,8 @@ async def get_status():
         "status": "online",
         "device": default_runtime_device(),
         "available_models": list(MODELS.keys()),
+        # CFG の既定値。画面のスライダーの初期値はこれに合わせる（表を二か所に持たない）
+        "cfg_defaults": {m: cfg_defaults_for(m) for m in MODELS},
         "registered_voices": voices,
         # 精度の選択肢。UI はこれを見て bf16 を出すか決める。旧世代の GPU で
         # bf16 を選べてしまうと、エラーも出ないまま遅くなるだけになる。
@@ -567,8 +596,8 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
             hint = ("。v4 の LoRA は duration predictor を丸ごと持つため、"
                     "v4.1 に当てても結果は v4 と同じになります")
         return JSONResponse(status_code=400, content={
-            "error": f"LoRA '{lora_name_raw}' は base={lora_base} で学習されています。"
-                     f"model_type={model_type} には当てられません{hint}",
+            "error": f"LoRA '{lora_name_raw}' は {model_label(lora_base)} で学習されています。"
+                     f"{model_label(model_type)} には当てられません{hint}",
         })
 
     try:
@@ -577,9 +606,14 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
         v_id = voice_id or data.get("voice_id")
 
         if ref_wav:
-            temp_ref_path = Path("temp_ref.wav")
-            with open(temp_ref_path, "wb") as f:
+            # 置き場はデータ領域。相対パスだとサーバの cwd（インストール先の
+            # resourcesackend\APP）に書くことになり、Program Files に入れると
+            # PermissionError で参照音声つきの生成が全部落ちる。名前も毎回変えて、
+            # 同時に来た2件が同じファイルを上書きしないようにする。
+            with tempfile.NamedTemporaryFile(dir=data_root(), prefix="temp_ref_",
+                                             suffix=".wav", delete=False) as f:
                 f.write(await ref_wav.read())
+            temp_ref_path = Path(f.name)
             is_temp_file = True
         elif isinstance(data.get("ref_wav"), str) and data["ref_wav"].strip():
             # JSON でパスを渡す経路。multipart のアップロードと voice_id しか
@@ -718,9 +752,6 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
             wav_meta.tag_wav(out_path, meta)
             out_urls.append(f"/api/v1/outputs/{filename}")
 
-        if is_temp_file and temp_ref_path and temp_ref_path.exists():
-            os.remove(temp_ref_path)
-
         timing_details = []
         if hasattr(result, "stage_timings"):
             timing_details = [f"{name}: {sec*1000:.1f}ms" for name, sec in result.stage_timings]
@@ -740,6 +771,10 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
         import traceback
         traceback.print_exc()
         return JSONResponse(status_code=500, content={"error": str(e)})
+    finally:
+        # 失敗したときも消す。一時ファイルは毎回名前が変わるので、残すと溜まる。
+        if is_temp_file and temp_ref_path and temp_ref_path.exists():
+            os.remove(temp_ref_path)
 
 @app.middleware("http")
 async def log_requests(request: Request, call_next):

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import random
@@ -41,6 +42,15 @@ from irodori_tts.lora import (
     load_lora_adapter,
     train_config_uses_lora,
 )
+from irodori_tts.meanflow import (
+    EncodedConditions,
+    adaptive_meanflow_loss,
+    apply_condition_profile,
+    compute_teacher_meanflow_target,
+    conditions_to_device,
+    index_conditions,
+    sample_meanflow_interval,
+)
 from irodori_tts.model import (
     DURATION_ARCHITECTURES,
     DURATION_CAPTION_FUSIONS,
@@ -70,7 +80,24 @@ from irodori_tts.speaker_inversion import (
 from irodori_tts.tokenizer import PretrainedTextTokenizer
 
 WANDB_MODES = {"online", "offline", "disabled"}
-TRAIN_MODES = {"rf", "duration_only"}
+TRAIN_MODES = {"rf", "duration_only", "meanflow_distill"}
+MEANFLOW_RESUME_OBJECTIVE_FIELDS = (
+    "teacher_checkpoint",
+    "teacher_steps",
+    "meanflow_anchor_prob",
+    "meanflow_time_logit_mean",
+    "meanflow_time_logit_std",
+    "meanflow_adaptive_weight_power",
+    "meanflow_adaptive_weight_eps",
+    "meanflow_cfg_text_scale",
+    "meanflow_cfg_speaker_scale",
+    "meanflow_cfg_caption_scale",
+    "meanflow_cfg_min_t",
+    "meanflow_cfg_max_t",
+    "text_condition_dropout",
+    "speaker_condition_dropout",
+    "caption_condition_dropout",
+)
 CHECKPOINT_STEP_RE = re.compile(
     rf"^checkpoint_(\d+)(?:\.pt|{re.escape(SPEAKER_INVERSION_SAFETENSORS_SUFFIX)})?$"
 )
@@ -102,6 +129,13 @@ DURATION_CONDITION_GROUPS = (
     "no_speaker_no_caption",
 )
 DURATION_CONDITION_GROUP_TOTAL_SIZE = len(DURATION_CONDITION_GROUPS) * 3
+DURATION_LENGTH_BUCKETS = (
+    ("frames_1_100", 1, 100),
+    ("frames_101_200", 101, 200),
+    ("frames_201_400", 201, 400),
+    ("frames_401_750", 401, 750),
+)
+DURATION_LENGTH_BUCKET_TOTAL_SIZE = len(DURATION_LENGTH_BUCKETS) * 3
 
 
 def set_seed(seed: int) -> None:
@@ -165,6 +199,206 @@ def compute_rf_loss(
     if mode == "utterance_mean":
         return utterance_mean_masked_mse(pred, target, valid_mask=valid_mask)
     raise ValueError(f"Unsupported rf_loss_mode={mode!r}. Expected 'echo' or 'utterance_mean'.")
+
+
+def freeze_for_meanflow(model: TextToLatentRFDiT) -> tuple[int, int]:
+    """Freeze non-DiT modules; MeanFlow updates the complete student DiT only."""
+    dit_prefixes = (
+        "cond_module.",
+        "delta_cond_module.",
+        "in_proj.",
+        "blocks.",
+        "out_norm.",
+        "out_proj.",
+    )
+    trainable = 0
+    frozen = 0
+    for name, parameter in model.named_parameters():
+        should_train = name.startswith(dit_prefixes)
+        parameter.requires_grad_(should_train)
+        if should_train:
+            trainable += parameter.numel()
+        else:
+            frozen += parameter.numel()
+    return trainable, frozen
+
+
+def set_meanflow_frozen_modules_eval(model: TextToLatentRFDiT) -> None:
+    for name in (
+        "pretrained_text_backbone",
+        "text_encoder",
+        "text_norm",
+        "speaker_encoder",
+        "speaker_norm",
+        "caption_encoder",
+        "caption_norm",
+        "duration_predictor",
+    ):
+        module = getattr(model, name, None)
+        if module is not None:
+            module.eval()
+
+
+def resolve_meanflow_teacher_device(
+    *,
+    student_device: torch.device,
+    local_rank: int,
+    local_world_size: int,
+    device_offset: int,
+    visible_cuda_devices: int | None = None,
+) -> torch.device:
+    if device_offset < 0:
+        raise ValueError("MeanFlow teacher device offset must be non-negative.")
+    if device_offset == 0:
+        return student_device
+    if student_device.type != "cuda":
+        raise ValueError("A separate MeanFlow teacher device requires CUDA.")
+    if local_world_size <= 0:
+        raise ValueError("MeanFlow local world size must be positive.")
+    if not 0 <= local_rank < local_world_size:
+        raise ValueError(
+            f"MeanFlow local_rank={local_rank} is outside local_world_size={local_world_size}."
+        )
+    if device_offset < local_world_size:
+        raise ValueError(
+            "Paired MeanFlow teacher GPUs must not overlap student GPUs: "
+            f"offset={device_offset} local_world_size={local_world_size}."
+        )
+    device_count = (
+        torch.cuda.device_count() if visible_cuda_devices is None else visible_cuda_devices
+    )
+    teacher_index = local_rank + device_offset
+    if device_offset + local_world_size > device_count or teacher_index >= device_count:
+        raise ValueError(
+            "Paired MeanFlow teacher GPU is unavailable: "
+            f"local_rank={local_rank} offset={device_offset} "
+            f"local_world_size={local_world_size} visible_cuda_devices={device_count}."
+        )
+    return torch.device(f"cuda:{teacher_index}")
+
+
+def compute_meanflow_distillation_loss(
+    *,
+    model,
+    teacher: TextToLatentRFDiT,
+    train_cfg: TrainConfig,
+    x0: torch.Tensor,
+    latent_mask: torch.Tensor,
+    valid_mask: torch.Tensor,
+    text_ids: torch.Tensor,
+    text_mask: torch.Tensor,
+    ref_latent: torch.Tensor | None,
+    ref_mask: torch.Tensor | None,
+    caption_ids: torch.Tensor | None,
+    caption_mask: torch.Tensor | None,
+    text_drop: torch.Tensor,
+    speaker_drop: torch.Tensor | None,
+    caption_drop: torch.Tensor | None,
+    use_bf16: bool,
+) -> torch.Tensor:
+    batch_size = x0.shape[0]
+    r, t, delta_t, anchor_mask = sample_meanflow_interval(
+        batch_size=batch_size,
+        device=x0.device,
+        logit_mean=train_cfg.meanflow_time_logit_mean,
+        logit_std=train_cfg.meanflow_time_logit_std,
+        anchor_prob=train_cfg.meanflow_anchor_prob,
+    )
+    noise = torch.randn_like(x0)
+    x_t = rf_interpolate(x0, noise, t)
+    teacher_device = next(teacher.parameters()).device
+    cross_device_teacher = teacher_device != x0.device
+
+    def to_teacher(value: torch.Tensor | None) -> torch.Tensor | None:
+        if value is None:
+            return None
+        return value.to(device=teacher_device, non_blocking=not cross_device_teacher)
+
+    with torch.no_grad(), torch.autocast(device_type=teacher_device.type, enabled=False):
+        encoded = EncodedConditions(
+            *teacher.encode_conditions(
+                text_input_ids=to_teacher(text_ids),
+                text_mask=to_teacher(text_mask),
+                ref_latent=to_teacher(ref_latent),
+                ref_mask=to_teacher(ref_mask),
+                caption_input_ids=to_teacher(caption_ids),
+                caption_mask=to_teacher(caption_mask),
+            )
+        )
+        base_conditions = apply_condition_profile(
+            encoded,
+            text_drop=to_teacher(text_drop),
+            speaker_drop=to_teacher(speaker_drop),
+            caption_drop=to_teacher(caption_drop),
+        )
+        formula = rf_velocity_target(x0, noise).float()
+        target = formula.clone()
+        non_anchor_index = torch.nonzero(~anchor_mask, as_tuple=False).squeeze(-1)
+        if non_anchor_index.numel() > 0:
+            teacher_index = non_anchor_index.to(device=teacher_device)
+            rollout_target = compute_teacher_meanflow_target(
+                teacher=teacher,
+                x_t=to_teacher(x_t.index_select(0, non_anchor_index)),
+                t=to_teacher(t.index_select(0, non_anchor_index)),
+                r=to_teacher(r.index_select(0, non_anchor_index)),
+                conditions=index_conditions(base_conditions, teacher_index),
+                latent_mask=to_teacher(latent_mask.index_select(0, non_anchor_index)),
+                valid_mask=to_teacher(valid_mask.index_select(0, non_anchor_index)),
+                teacher_steps=train_cfg.teacher_steps,
+                cfg_text_scale=train_cfg.meanflow_cfg_text_scale,
+                cfg_speaker_scale=train_cfg.meanflow_cfg_speaker_scale,
+                cfg_caption_scale=train_cfg.meanflow_cfg_caption_scale,
+                cfg_min_t=train_cfg.meanflow_cfg_min_t,
+                cfg_max_t=train_cfg.meanflow_cfg_max_t,
+                sample_chunk_size=train_cfg.meanflow_teacher_chunk_size,
+                branch_batch_size=train_cfg.meanflow_teacher_branch_batch_size,
+                fuse_base_branch=train_cfg.meanflow_teacher_fuse_base_branch,
+            )
+            target.index_copy_(
+                0,
+                non_anchor_index,
+                rollout_target.to(
+                    device=x0.device,
+                    non_blocking=not cross_device_teacher,
+                ),
+            )
+        target = target * valid_mask[:, :, None].float()
+        student_conditions = conditions_to_device(
+            base_conditions,
+            x0.device,
+            non_blocking=not cross_device_teacher,
+        )
+
+    with torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_bf16 else nullcontext():
+        pred = model(
+            x_t=x_t,
+            t=t,
+            delta_t=delta_t,
+            text_input_ids=text_ids,
+            text_mask=text_mask,
+            ref_latent=ref_latent,
+            ref_mask=ref_mask,
+            caption_input_ids=caption_ids,
+            caption_mask=caption_mask,
+            latent_mask=latent_mask,
+            encoded_conditions=(
+                student_conditions.text_state,
+                student_conditions.text_mask,
+                student_conditions.speaker_state,
+                student_conditions.speaker_mask,
+                student_conditions.caption_state,
+                student_conditions.caption_mask,
+            ),
+        )
+    if not isinstance(pred, torch.Tensor):
+        raise RuntimeError("MeanFlow student forward must return one velocity tensor.")
+    return adaptive_meanflow_loss(
+        pred,
+        target,
+        valid_mask,
+        power=train_cfg.meanflow_adaptive_weight_power,
+        eps=train_cfg.meanflow_adaptive_weight_eps,
+    )
 
 
 def save_checkpoint(
@@ -511,6 +745,7 @@ def validate_pretrained_backbone_dim(
     expected_dim: int | None,
     local_files_only: bool = False,
     revision: str | None = None,
+    config_dict: dict[str, object] | None = None,
 ) -> int:
     try:
         from transformers import AutoConfig
@@ -520,12 +755,19 @@ def validate_pretrained_backbone_dim(
             "Install with `pip install transformers sentencepiece`."
         ) from exc
 
-    text_cfg = AutoConfig.from_pretrained(
-        repo_id,
-        trust_remote_code=False,
-        local_files_only=local_files_only,
-        revision=revision,
-    )
+    if config_dict is None:
+        text_cfg = AutoConfig.from_pretrained(
+            repo_id,
+            trust_remote_code=False,
+            local_files_only=local_files_only,
+            revision=revision,
+        )
+    else:
+        raw_config = dict(config_dict)
+        model_type = raw_config.pop("model_type", None)
+        if not isinstance(model_type, str) or not model_type:
+            raise ValueError("Embedded pretrained text encoder config has no model_type.")
+        text_cfg = AutoConfig.for_model(model_type, **raw_config)
     hidden_size = getattr(text_cfg, "hidden_size", None)
     if hidden_size is None:
         encoder_cfg = getattr(text_cfg, "encoder", None)
@@ -547,12 +789,14 @@ def validate_text_backbone_dim(
     model_cfg: ModelConfig,
     *,
     local_files_only: bool = False,
+    config_dict: dict[str, object] | None = None,
 ) -> int:
     return validate_pretrained_backbone_dim(
         repo_id=model_cfg.text_tokenizer_repo,
         expected_dim=(None if model_cfg.use_pretrained_text_encoder else int(model_cfg.text_dim)),
         local_files_only=local_files_only,
         revision=model_cfg.text_encoder_revision,
+        config_dict=config_dict,
     )
 
 
@@ -560,6 +804,7 @@ def validate_caption_backbone_dim(
     model_cfg: ModelConfig,
     *,
     local_files_only: bool = False,
+    config_dict: dict[str, object] | None = None,
 ) -> int:
     return validate_pretrained_backbone_dim(
         repo_id=model_cfg.caption_tokenizer_repo_resolved,
@@ -568,6 +813,7 @@ def validate_caption_backbone_dim(
         ),
         local_files_only=local_files_only,
         revision=model_cfg.text_encoder_revision,
+        config_dict=config_dict,
     )
 
 
@@ -894,6 +1140,52 @@ def _check_model_config_compatibility(
                 ]
             )
 
+    if checkpoint_cfg.use_duration_predictor and current_model_cfg.use_duration_predictor:
+        comparisons.extend(
+            [
+                (
+                    "duration_aux_dim",
+                    checkpoint_cfg.duration_aux_dim,
+                    current_model_cfg.duration_aux_dim,
+                ),
+                (
+                    "duration_hidden_dim",
+                    checkpoint_cfg.duration_hidden_dim,
+                    current_model_cfg.duration_hidden_dim,
+                ),
+                (
+                    "duration_layers",
+                    checkpoint_cfg.duration_layers,
+                    current_model_cfg.duration_layers,
+                ),
+                (
+                    "duration_attention_heads",
+                    checkpoint_cfg.duration_attention_heads,
+                    current_model_cfg.duration_attention_heads,
+                ),
+                (
+                    "duration_architecture",
+                    checkpoint_cfg.duration_architecture,
+                    current_model_cfg.duration_architecture,
+                ),
+                (
+                    "duration_speaker_fusion",
+                    checkpoint_cfg.duration_speaker_fusion,
+                    current_model_cfg.duration_speaker_fusion,
+                ),
+                (
+                    "duration_caption_fusion",
+                    checkpoint_cfg.duration_caption_fusion,
+                    current_model_cfg.duration_caption_fusion,
+                ),
+                (
+                    "duration_caption_pooling",
+                    checkpoint_cfg.duration_caption_pooling,
+                    current_model_cfg.duration_caption_pooling,
+                ),
+            ]
+        )
+
     for key, checkpoint_value, current_value in comparisons:
         if checkpoint_value != current_value:
             raise ValueError(
@@ -1208,6 +1500,41 @@ def _normalize_checkpoint_path(path: str | Path) -> Path:
     return Path(os.path.abspath(str(Path(path).expanduser())))
 
 
+def _resolve_bundled_tokenizer_source(checkpoint_path: Path) -> Path | None:
+    for candidate in (
+        checkpoint_path.parent / "tokenizer",
+        checkpoint_path.parent.parent / "tokenizer",
+    ):
+        if (candidate / "tokenizer_config.json").is_file():
+            return candidate
+    return None
+
+
+def _load_embedded_text_encoder_config(checkpoint_path: Path) -> dict[str, object] | None:
+    """Read condition-backbone config without materializing checkpoint weights."""
+    if checkpoint_path.suffix.lower() == ".safetensors":
+        from safetensors import safe_open
+
+        with safe_open(str(checkpoint_path), framework="pt", device="cpu") as handle:
+            raw_config = (handle.metadata() or {}).get(
+                SAFETENSORS_TEXT_ENCODER_CONFIG_META_KEY
+            )
+        if raw_config is None:
+            return None
+        parsed = json.loads(raw_config)
+        if not isinstance(parsed, dict):
+            raise ValueError(
+                f"Embedded text encoder config must be a dictionary: {checkpoint_path}"
+            )
+        return parsed
+
+    payload = _load_checkpoint_payload(checkpoint_path, map_location="cpu")
+    raw_config = payload.get("text_encoder_config")
+    if raw_config is not None and not isinstance(raw_config, dict):
+        raise ValueError(f"Checkpoint text_encoder_config must be a dictionary: {checkpoint_path}")
+    return raw_config
+
+
 def _lora_field_cli_explicit(field: str, args: argparse.Namespace, raw_argv: list[str]) -> bool:
     if field == "lora_enabled":
         return args.lora_enabled is not None
@@ -1249,6 +1576,39 @@ def _restore_resume_lora_config(
     if updates:
         train_cfg = replace(train_cfg, **updates)
     return train_cfg
+
+
+def _validate_meanflow_resume_objective(
+    train_cfg: TrainConfig,
+    *,
+    resume_train_cfg: dict | None,
+    resume_model_cfg: dict | None,
+) -> None:
+    """Prevent a MeanFlow checkpoint and Muon state resuming onto a new target."""
+    if not isinstance(resume_train_cfg, dict):
+        raise ValueError("MeanFlow resume checkpoint is missing train_config provenance.")
+    if str(resume_train_cfg.get("train_mode", "")).strip().lower() != "meanflow_distill":
+        raise ValueError("MeanFlow training can only resume a meanflow_distill checkpoint.")
+    if not isinstance(resume_model_cfg, dict):
+        raise ValueError("MeanFlow resume checkpoint is missing model_config provenance.")
+    if str(resume_model_cfg.get("flow_parameterization", "")).strip().lower() != "meanflow":
+        raise ValueError("MeanFlow resume checkpoint must contain a MeanFlow student.")
+
+    for field in MEANFLOW_RESUME_OBJECTIVE_FIELDS:
+        if field not in resume_train_cfg:
+            raise ValueError(
+                f"MeanFlow resume checkpoint is missing objective field train.{field}."
+            )
+        current_value = getattr(train_cfg, field)
+        resume_value = resume_train_cfg[field]
+        if field == "teacher_checkpoint":
+            current_value = str(_normalize_checkpoint_path(current_value))
+            resume_value = str(_normalize_checkpoint_path(resume_value))
+        if current_value != resume_value:
+            raise ValueError(
+                f"MeanFlow resume checkpoint expects train.{field}={resume_value!r}, "
+                f"but current config requests {current_value!r}."
+            )
 
 
 def _initialize_base_model_from_pretrained_embeddings(
@@ -1772,6 +2132,68 @@ def duration_condition_group_metrics(totals: torch.Tensor) -> dict[str, float]:
     return metrics
 
 
+def duration_length_bucket_totals(
+    *,
+    pred_frames: torch.Tensor,
+    target_frames: torch.Tensor,
+) -> torch.Tensor:
+    totals = torch.zeros(
+        DURATION_LENGTH_BUCKET_TOTAL_SIZE,
+        device=pred_frames.device,
+        dtype=torch.float64,
+    )
+    target = target_frames.float()
+    error = pred_frames.float() - target
+    for bucket_index, (_, lower, upper) in enumerate(DURATION_LENGTH_BUCKETS):
+        mask = (target >= float(lower)) & (target <= float(upper))
+        if not mask.any():
+            continue
+        offset = bucket_index * 3
+        totals[offset] = error[mask].abs().detach().double().sum()
+        totals[offset + 1] = error[mask].detach().double().sum()
+        totals[offset + 2] = mask.sum().double()
+    return totals
+
+
+def duration_length_bucket_metrics(totals: torch.Tensor) -> dict[str, float]:
+    metrics: dict[str, float] = {}
+    total_absolute_error = 0.0
+    total_error = 0.0
+    total_count = 0.0
+    for bucket_index, (bucket_name, _, _) in enumerate(DURATION_LENGTH_BUCKETS):
+        offset = bucket_index * 3
+        count = max(float(totals[offset + 2].item()), 0.0)
+        error_sum = float(totals[offset + 1].item())
+        metrics[f"duration_mae_{bucket_name}"] = (
+            float(totals[offset].item() / count) if count > 0.0 else 0.0
+        )
+        metrics[f"duration_bias_{bucket_name}"] = error_sum / count if count > 0.0 else 0.0
+        metrics[f"duration_samples_{bucket_name}"] = count
+        total_absolute_error += float(totals[offset].item())
+        total_error += error_sum
+        total_count += count
+    metrics["duration_mae_frames"] = (
+        total_absolute_error / total_count if total_count > 0.0 else 0.0
+    )
+    metrics["duration_bias_frames"] = total_error / total_count if total_count > 0.0 else 0.0
+    return metrics
+
+
+def duration_length_bucket_wandb_metrics(
+    prefix: str,
+    metrics: dict[str, float],
+) -> dict[str, float]:
+    out = {f"{prefix}/duration_bias_frames": metrics["duration_bias_frames"]}
+    for bucket_name, _, _ in DURATION_LENGTH_BUCKETS:
+        for metric_name in (
+            f"duration_mae_{bucket_name}",
+            f"duration_bias_{bucket_name}",
+            f"duration_samples_{bucket_name}",
+        ):
+            out[f"{prefix}/{metric_name}"] = metrics[metric_name]
+    return out
+
+
 def duration_condition_group_log_suffix(metrics: dict[str, float]) -> str:
     groups = [
         ("sp", "speaker"),
@@ -1847,9 +2269,10 @@ def split_train_valid_indices(
     return train_indices, valid_indices
 
 
-def run_validation(
+def run_meanflow_validation(
     *,
     model,
+    teacher: TextToLatentRFDiT,
     loader: TorchDataLoader,
     train_cfg: TrainConfig,
     device: torch.device,
@@ -1857,11 +2280,113 @@ def run_validation(
     distributed: bool,
 ) -> dict[str, float]:
     was_training = model.training
+    raw_model = model.module if isinstance(model, DDP) else model
+    model.eval()
+    teacher.eval()
+    totals = torch.zeros(3, device=device, dtype=torch.float64)
+    with torch.no_grad():
+        for batch in loader:
+            text_ids = batch["text_ids"].to(device, non_blocking=True)
+            text_mask = batch["text_mask"].to(device, non_blocking=True)
+            x0 = batch["latent_patched"].to(device, non_blocking=True)
+            latent_mask = batch["latent_mask_patched"].to(device, non_blocking=True)
+            valid_mask = batch["latent_mask_valid_patched"].to(device, non_blocking=True)
+            batch_size = text_ids.shape[0]
+
+            caption_ids = None
+            caption_mask = None
+            caption_drop = None
+            if raw_model.cfg.use_caption_condition:
+                caption_ids = batch["caption_ids"].to(device, non_blocking=True)
+                caption_mask = batch["caption_mask"].to(device, non_blocking=True)
+                has_caption = batch["has_caption"].to(device, non_blocking=True)
+                sampled_drop = (
+                    torch.rand(batch_size, device=device) < train_cfg.caption_condition_dropout
+                )
+                caption_drop = ~(has_caption & ~sampled_drop)
+
+            ref_latent = None
+            ref_mask = None
+            speaker_drop = None
+            if raw_model.cfg.use_speaker_condition_resolved:
+                ref_latent = batch["ref_latent_patched"].to(device, non_blocking=True)
+                ref_mask = batch["ref_latent_mask_patched"].to(device, non_blocking=True)
+                has_speaker = batch["has_speaker"].to(device, non_blocking=True)
+                sampled_drop = (
+                    torch.rand(batch_size, device=device) < train_cfg.speaker_condition_dropout
+                )
+                speaker_drop = ~(has_speaker & ~sampled_drop)
+
+            text_drop = torch.rand(batch_size, device=device) < train_cfg.text_condition_dropout
+            loss = compute_meanflow_distillation_loss(
+                model=model,
+                teacher=teacher,
+                train_cfg=train_cfg,
+                x0=x0,
+                latent_mask=latent_mask,
+                valid_mask=valid_mask,
+                text_ids=text_ids,
+                text_mask=text_mask,
+                ref_latent=ref_latent,
+                ref_mask=ref_mask,
+                caption_ids=caption_ids,
+                caption_mask=caption_mask,
+                text_drop=text_drop,
+                speaker_drop=speaker_drop,
+                caption_drop=caption_drop,
+                use_bf16=use_bf16,
+            )
+            weight = float(batch_size)
+            totals[0] += loss.detach().double() * weight
+            totals[1] += batch["num_frames"].float().mean().double().to(device) * weight
+            totals[2] += weight
+
+    if distributed:
+        dist.all_reduce(totals, op=dist.ReduceOp.SUM)
+    denom = max(float(totals[2].item()), 1.0)
+    if was_training:
+        model.train()
+        set_meanflow_frozen_modules_eval(raw_model)
+    return {
+        "loss": float(totals[0].item() / denom),
+        "rf_loss": float(totals[0].item() / denom),
+        "duration_loss": 0.0,
+        "duration_mae_frames": 0.0,
+        "target_frames_mean": float(totals[1].item() / denom),
+        "num_samples": float(totals[2].item()),
+    }
+
+
+def run_validation(
+    *,
+    model,
+    teacher: TextToLatentRFDiT | None,
+    loader: TorchDataLoader,
+    train_cfg: TrainConfig,
+    device: torch.device,
+    use_bf16: bool,
+    distributed: bool,
+) -> dict[str, float]:
+    if train_cfg.train_mode == "meanflow_distill":
+        if teacher is None:
+            raise RuntimeError("MeanFlow validation requires a teacher model.")
+        return run_meanflow_validation(
+            model=model,
+            teacher=teacher,
+            loader=loader,
+            train_cfg=train_cfg,
+            device=device,
+            use_bf16=use_bf16,
+            distributed=distributed,
+        )
+    was_training = model.training
     model_cfg = model.module.cfg if isinstance(model, DDP) else model.cfg
     duration_only = train_cfg.train_mode == "duration_only"
     model.eval()
+    condition_offset = 6
+    length_bucket_offset = condition_offset + DURATION_CONDITION_GROUP_TOTAL_SIZE
     totals = torch.zeros(
-        6 + DURATION_CONDITION_GROUP_TOTAL_SIZE,
+        length_bucket_offset + DURATION_LENGTH_BUCKET_TOTAL_SIZE,
         device=device,
         dtype=torch.float64,
     )
@@ -2023,13 +2548,19 @@ def run_validation(
                 duration_loss = duration_loss_per_sample.mean()
                 pred_frames = torch.expm1(duration_pred.float()).clamp_min(0.0)
                 duration_mae_frames = (pred_frames - num_frames.float()).abs().mean()
+                totals[length_bucket_offset:] += duration_length_bucket_totals(
+                    pred_frames=pred_frames,
+                    target_frames=num_frames,
+                )
                 if duration_only:
-                    totals[6:] += duration_condition_group_totals(
-                        duration_loss_per_sample=duration_loss_per_sample,
-                        pred_frames=pred_frames,
-                        target_frames=num_frames.float(),
-                        has_speaker=has_speaker,
-                        has_caption=has_caption,
+                    totals[condition_offset:length_bucket_offset] += (
+                        duration_condition_group_totals(
+                            duration_loss_per_sample=duration_loss_per_sample,
+                            pred_frames=pred_frames,
+                            target_frames=num_frames.float(),
+                            has_speaker=has_speaker,
+                            has_caption=has_caption,
+                        )
                     )
             if duration_only:
                 loss = duration_loss
@@ -2056,7 +2587,11 @@ def run_validation(
         "num_samples": float(totals[5].item()),
     }
     if duration_only:
-        metrics.update(duration_condition_group_metrics(totals[6:]))
+        metrics.update(
+            duration_condition_group_metrics(totals[condition_offset:length_bucket_offset])
+        )
+    if model_cfg.use_duration_predictor:
+        metrics.update(duration_length_bucket_metrics(totals[length_bucket_offset:]))
     if was_training:
         model.train()
     return metrics
@@ -2110,7 +2645,10 @@ def main() -> None:
         "--train-mode",
         choices=sorted(TRAIN_MODES),
         default=None,
-        help="Training objective: rf runs DiT/RF training; duration_only trains only the duration predictor.",
+        help=(
+            "Training objective: rf runs DiT/RF training; meanflow_distill distills a "
+            "frozen RF teacher; duration_only trains only the duration predictor."
+        ),
     )
     parser.add_argument(
         "--resume",
@@ -2155,8 +2693,17 @@ def main() -> None:
         type=float,
         default=1e-5,
         help=(
-            "AdamW learning rate for a trainable pretrained text/caption backbone. "
+            "Learning rate for a trainable pretrained text/caption backbone. "
             "The main scheduler multiplier is applied to this LR as well."
+        ),
+    )
+    parser.add_argument(
+        "--pretrained-text-encoder-optimizer",
+        choices=["adamw", "muon"],
+        default="adamw",
+        help=(
+            "Optimizer for trainable pretrained text/caption backbone matrices. "
+            "Embedding, norm, and bias parameters remain on AdamW."
         ),
     )
     parser.add_argument("--weight-decay", type=float, default=0.01)
@@ -2493,6 +3040,11 @@ def main() -> None:
             train_cfg,
             pretrained_text_encoder_learning_rate=(args.pretrained_text_encoder_learning_rate),
         )
+    if cli_provided(raw_argv, "--pretrained-text-encoder-optimizer"):
+        train_cfg = replace(
+            train_cfg,
+            pretrained_text_encoder_optimizer=args.pretrained_text_encoder_optimizer,
+        )
     if cli_provided(raw_argv, "--weight-decay"):
         train_cfg = replace(train_cfg, weight_decay=args.weight_decay)
     if cli_provided(raw_argv, "--optimizer"):
@@ -2691,6 +3243,23 @@ def main() -> None:
             "pretrained_text_encoder_learning_rate must be > 0, got "
             f"{train_cfg.pretrained_text_encoder_learning_rate}."
         )
+    pretrained_text_encoder_optimizer = (
+        str(train_cfg.pretrained_text_encoder_optimizer).strip().lower()
+    )
+    if pretrained_text_encoder_optimizer not in {"adamw", "muon"}:
+        raise ValueError(
+            "pretrained_text_encoder_optimizer must be one of ['adamw', 'muon'], "
+            f"got {train_cfg.pretrained_text_encoder_optimizer!r}."
+        )
+    if (
+        pretrained_text_encoder_optimizer == "muon"
+        and str(train_cfg.optimizer).strip().lower() != "muon"
+    ):
+        raise ValueError("pretrained_text_encoder_optimizer='muon' requires optimizer='muon'.")
+    train_cfg = replace(
+        train_cfg,
+        pretrained_text_encoder_optimizer=pretrained_text_encoder_optimizer,
+    )
     if (
         model_cfg.use_pretrained_text_encoder
         and model_cfg.use_caption_condition
@@ -2725,6 +3294,65 @@ def main() -> None:
             f"train_mode must be one of {sorted(TRAIN_MODES)}, got {train_cfg.train_mode!r}"
         )
     train_cfg = replace(train_cfg, train_mode=str(train_cfg.train_mode).strip().lower())
+    flow_parameterization = str(model_cfg.flow_parameterization).strip().lower()
+    if flow_parameterization not in {"rf_velocity", "meanflow"}:
+        raise ValueError(
+            "model.flow_parameterization must be 'rf_velocity' or 'meanflow', "
+            f"got {model_cfg.flow_parameterization!r}"
+        )
+    if train_cfg.train_mode == "meanflow_distill":
+        if not train_cfg.teacher_checkpoint:
+            raise ValueError("train_mode='meanflow_distill' requires train.teacher_checkpoint.")
+        if args.resume is not None:
+            _validate_meanflow_resume_objective(
+                train_cfg,
+                resume_train_cfg=resume_train_cfg,
+                resume_model_cfg=resume_model_cfg,
+            )
+        if args.resume is None:
+            teacher_path = str(Path(train_cfg.teacher_checkpoint).expanduser())
+            if args.init_checkpoint is not None:
+                init_path = str(_normalize_checkpoint_path(args.init_checkpoint))
+                if init_path != str(_normalize_checkpoint_path(teacher_path)):
+                    raise ValueError(
+                        "MeanFlow student and teacher must initialize from the same RF checkpoint; "
+                        "omit --init-checkpoint or set it equal to train.teacher_checkpoint."
+                    )
+            args.init_checkpoint = teacher_path
+        model_cfg = replace(model_cfg, flow_parameterization="meanflow")
+        if train_config_uses_lora(train_cfg):
+            raise ValueError("meanflow_distill does not support LoRA training.")
+        if train_cfg.speaker_inversion_enabled:
+            raise ValueError("meanflow_distill does not support Speaker Inversion training.")
+        if train_cfg.caption_warmup or train_cfg.pretrained_projector_warmup_steps > 0:
+            raise ValueError("meanflow_distill does not train condition encoders or their warmups.")
+        if train_cfg.duration_backprop_to_condition:
+            raise ValueError("meanflow_distill freezes the duration and condition modules.")
+        if train_cfg.teacher_steps <= 0:
+            raise ValueError("meanflow_distill requires teacher_steps > 0.")
+        if not 0.0 <= train_cfg.meanflow_anchor_prob <= 1.0:
+            raise ValueError("meanflow_anchor_prob must be in [0, 1].")
+        if train_cfg.meanflow_time_logit_std <= 0:
+            raise ValueError("meanflow_time_logit_std must be positive.")
+        if train_cfg.meanflow_adaptive_weight_power < 0:
+            raise ValueError("meanflow_adaptive_weight_power must be non-negative.")
+        if train_cfg.meanflow_adaptive_weight_eps <= 0:
+            raise ValueError("meanflow_adaptive_weight_eps must be positive.")
+        if train_cfg.meanflow_cfg_min_t > train_cfg.meanflow_cfg_max_t:
+            raise ValueError("meanflow_cfg_min_t must be <= meanflow_cfg_max_t.")
+        if train_cfg.meanflow_teacher_chunk_size <= 0:
+            raise ValueError("meanflow_teacher_chunk_size must be positive.")
+        if not 1 <= train_cfg.meanflow_teacher_branch_batch_size <= 3:
+            raise ValueError("meanflow_teacher_branch_batch_size must be in [1, 3].")
+        if train_cfg.meanflow_teacher_device_offset < 0:
+            raise ValueError("meanflow_teacher_device_offset must be non-negative.")
+        if train_cfg.meanflow_compile_teacher and not hasattr(torch, "compile"):
+            raise RuntimeError("meanflow_compile_teacher requires torch.compile (PyTorch 2+).")
+    elif flow_parameterization != "rf_velocity":
+        raise ValueError(
+            "model.flow_parameterization='meanflow' is only valid with "
+            "train_mode='meanflow_distill'."
+        )
     if train_cfg.max_caption_len is not None and train_cfg.max_caption_len <= 0:
         raise ValueError(f"max_caption_len must be > 0, got {train_cfg.max_caption_len}")
     if train_cfg.gradient_accumulation_steps <= 0:
@@ -3032,57 +3660,129 @@ def main() -> None:
             f"W&B enabled: project={train_cfg.wandb_project} mode={train_cfg.wandb_mode} run={wandb_run.name if wandb_run is not None else train_cfg.wandb_run_name}"
         )
 
+    condition_asset_cfg = model_cfg
+    embedded_condition_config = None
+    condition_assets_are_local = False
+    if train_cfg.train_mode == "meanflow_distill":
+        condition_checkpoint = _normalize_checkpoint_path(train_cfg.teacher_checkpoint)
+        bundled_tokenizer = _resolve_bundled_tokenizer_source(condition_checkpoint)
+        embedded_condition_config = _load_embedded_text_encoder_config(condition_checkpoint)
+        if bundled_tokenizer is not None:
+            condition_asset_cfg = replace(
+                model_cfg,
+                text_tokenizer_repo=str(bundled_tokenizer),
+                caption_tokenizer_repo=(
+                    str(bundled_tokenizer) if model_cfg.use_caption_condition else None
+                ),
+                text_encoder_revision=None,
+            )
+            condition_assets_are_local = True
+        if condition_assets_are_local and embedded_condition_config is None:
+            raise ValueError(
+                "Bundled tokenizer was found, but the MeanFlow teacher checkpoint has no "
+                "embedded text encoder config."
+            )
+    elif args.init_checkpoint is not None:
+        # Client 独自：LoRA など公開チェックポイントから始める学習でも、同梱の
+        # tokenizer/ を使う。v4-Large のトークナイザ元 google/t5gemma-2-1b-1b は
+        # gated で、同意していない環境では読めない（学習が起動直後に落ちた）。
+        # 推論（inference_runtime._resolve_tokenizer_source）と同じ扱いにそろえる。
+        # tokenizer/ を同梱しない v4-Small 以前では何も変わらない。
+        condition_checkpoint = _normalize_checkpoint_path(args.init_checkpoint)
+        bundled_tokenizer = _resolve_bundled_tokenizer_source(condition_checkpoint)
+        if bundled_tokenizer is not None:
+            embedded_condition_config = _load_embedded_text_encoder_config(condition_checkpoint)
+            condition_asset_cfg = replace(
+                model_cfg,
+                text_tokenizer_repo=str(bundled_tokenizer),
+                caption_tokenizer_repo=(
+                    str(bundled_tokenizer) if model_cfg.use_caption_condition else None
+                ),
+                text_encoder_revision=None,
+            )
+            condition_assets_are_local = True
+
     if distributed:
         local_files_only = not is_main_process
         if is_main_process:
-            tokenizer = build_text_tokenizer(model_cfg, local_files_only=False)
-            text_hidden_size = validate_text_backbone_dim(model_cfg, local_files_only=False)
-            caption_tokenizer = None
-            caption_hidden_size = None
-            if model_cfg.use_caption_condition:
-                caption_tokenizer = build_caption_tokenizer(model_cfg, local_files_only=False)
-                caption_hidden_size = validate_caption_backbone_dim(
-                    model_cfg,
-                    local_files_only=False,
-                )
-        dist.barrier()
-        if not is_main_process:
-            tokenizer = build_text_tokenizer(model_cfg, local_files_only=local_files_only)
+            tokenizer = build_text_tokenizer(
+                condition_asset_cfg,
+                local_files_only=condition_assets_are_local,
+            )
             text_hidden_size = validate_text_backbone_dim(
-                model_cfg,
-                local_files_only=local_files_only,
+                condition_asset_cfg,
+                local_files_only=condition_assets_are_local,
+                config_dict=embedded_condition_config,
             )
             caption_tokenizer = None
             caption_hidden_size = None
             if model_cfg.use_caption_condition:
                 caption_tokenizer = build_caption_tokenizer(
-                    model_cfg,
-                    local_files_only=local_files_only,
+                    condition_asset_cfg,
+                    local_files_only=condition_assets_are_local,
                 )
                 caption_hidden_size = validate_caption_backbone_dim(
-                    model_cfg,
-                    local_files_only=local_files_only,
+                    condition_asset_cfg,
+                    local_files_only=condition_assets_are_local,
+                    config_dict=embedded_condition_config,
+                )
+        dist.barrier()
+        if not is_main_process:
+            tokenizer = build_text_tokenizer(
+                condition_asset_cfg,
+                local_files_only=(local_files_only or condition_assets_are_local),
+            )
+            text_hidden_size = validate_text_backbone_dim(
+                condition_asset_cfg,
+                local_files_only=(local_files_only or condition_assets_are_local),
+                config_dict=embedded_condition_config,
+            )
+            caption_tokenizer = None
+            caption_hidden_size = None
+            if model_cfg.use_caption_condition:
+                caption_tokenizer = build_caption_tokenizer(
+                    condition_asset_cfg,
+                    local_files_only=(local_files_only or condition_assets_are_local),
+                )
+                caption_hidden_size = validate_caption_backbone_dim(
+                    condition_asset_cfg,
+                    local_files_only=(local_files_only or condition_assets_are_local),
+                    config_dict=embedded_condition_config,
                 )
         dist.barrier()
     else:
-        tokenizer = build_text_tokenizer(model_cfg, local_files_only=False)
-        text_hidden_size = validate_text_backbone_dim(model_cfg, local_files_only=False)
+        tokenizer = build_text_tokenizer(
+            condition_asset_cfg,
+            local_files_only=condition_assets_are_local,
+        )
+        text_hidden_size = validate_text_backbone_dim(
+            condition_asset_cfg,
+            local_files_only=condition_assets_are_local,
+            config_dict=embedded_condition_config,
+        )
         caption_tokenizer = None
         caption_hidden_size = None
         if model_cfg.use_caption_condition:
-            caption_tokenizer = build_caption_tokenizer(model_cfg, local_files_only=False)
+            caption_tokenizer = build_caption_tokenizer(
+                condition_asset_cfg,
+                local_files_only=condition_assets_are_local,
+            )
             caption_hidden_size = validate_caption_backbone_dim(
-                model_cfg,
-                local_files_only=False,
+                condition_asset_cfg,
+                local_files_only=condition_assets_are_local,
+                config_dict=embedded_condition_config,
             )
     if is_main_process:
         print(
-            f"Text tokenizer={model_cfg.text_tokenizer_repo} vocab={tokenizer.vocab_size} add_bos={model_cfg.text_add_bos} padding_side=right "
+            f"Text tokenizer={condition_asset_cfg.text_tokenizer_repo} "
+            f"vocab={tokenizer.vocab_size} add_bos={model_cfg.text_add_bos} padding_side=right "
             f"(pretrained hidden_size={text_hidden_size})."
         )
         if model_cfg.use_caption_condition and caption_tokenizer is not None:
             print(
-                f"Caption tokenizer={model_cfg.caption_tokenizer_repo_resolved} vocab={caption_tokenizer.vocab_size} add_bos={model_cfg.caption_add_bos_resolved} padding_side=right "
+                f"Caption tokenizer={condition_asset_cfg.caption_tokenizer_repo_resolved} "
+                f"vocab={caption_tokenizer.vocab_size} "
+                f"add_bos={model_cfg.caption_add_bos_resolved} padding_side=right "
                 f"(pretrained hidden_size={caption_hidden_size})."
             )
     manifest_index = _ManifestIndex.build(
@@ -3397,11 +4097,25 @@ def main() -> None:
                     load_pretrained_backbone_weights = False
                     pretrained_backbone_config = init_text_encoder_config
 
+    meanflow_mode = train_cfg.train_mode == "meanflow_distill"
+    local_world_size = int(os.environ.get("LOCAL_WORLD_SIZE", str(world_size)))
+    meanflow_teacher_device = resolve_meanflow_teacher_device(
+        student_device=device,
+        local_rank=local_rank,
+        local_world_size=local_world_size,
+        device_offset=(train_cfg.meanflow_teacher_device_offset if meanflow_mode else 0),
+    )
+    construction_model_cfg = (
+        replace(model_cfg, flow_parameterization="rf_velocity")
+        if meanflow_mode and args.resume is None
+        else model_cfg
+    )
     raw_model: torch.nn.Module = TextToLatentRFDiT(
-        model_cfg,
+        construction_model_cfg,
         pretrained_backbone_config=pretrained_backbone_config,
         load_pretrained_backbone_weights=load_pretrained_backbone_weights,
     ).to(device)
+    meanflow_teacher: TextToLatentRFDiT | None = None
     lora_wrapped = False
     base_init: dict | None = None
     if args.resume is not None and train_config_uses_lora(train_cfg):
@@ -3447,6 +4161,62 @@ def main() -> None:
             raw_model = apply_lora(raw_model, train_cfg)
             lora_wrapped = True
 
+    if meanflow_mode:
+        if args.resume is None:
+            if meanflow_teacher_device == device:
+                meanflow_teacher = copy.deepcopy(raw_model)
+            else:
+                if preloaded_init_checkpoint is None:
+                    raise RuntimeError(
+                        "MeanFlow teacher checkpoint was not preloaded for separate-GPU setup."
+                    )
+                teacher_state = preloaded_init_checkpoint[0]
+                meanflow_teacher = TextToLatentRFDiT(
+                    construction_model_cfg,
+                    pretrained_backbone_config=pretrained_backbone_config,
+                    load_pretrained_backbone_weights=False,
+                ).to(meanflow_teacher_device)
+                meanflow_teacher.load_state_dict(teacher_state, strict=True)
+            raw_model.enable_meanflow_parameterization()
+            raw_model.cfg = model_cfg
+        else:
+            teacher_path = _normalize_checkpoint_path(train_cfg.teacher_checkpoint)
+            teacher_state, teacher_cfg_dict, _, teacher_text_config = (
+                _load_model_state_from_checkpoint(teacher_path)
+            )
+            teacher_cfg = replace(model_cfg, flow_parameterization="rf_velocity")
+            if teacher_cfg_dict is not None:
+                teacher_cfg = merge_dataclass_overrides(
+                    ModelConfig(), teacher_cfg_dict, section="teacher model_config"
+                )
+            if str(teacher_cfg.flow_parameterization).strip().lower() != "rf_velocity":
+                raise ValueError("train.teacher_checkpoint must be an RF velocity checkpoint.")
+            _check_model_config_compatibility(
+                teacher_path,
+                teacher_cfg_dict,
+                replace(model_cfg, flow_parameterization="rf_velocity"),
+                require_caption_match=True,
+            )
+            meanflow_teacher = TextToLatentRFDiT(
+                teacher_cfg,
+                pretrained_backbone_config=teacher_text_config,
+                load_pretrained_backbone_weights=not teacher_cfg.use_pretrained_text_encoder,
+            ).to(meanflow_teacher_device)
+            meanflow_teacher.load_state_dict(teacher_state, strict=True)
+        for parameter in meanflow_teacher.parameters():
+            parameter.requires_grad_(False)
+        meanflow_teacher.float().eval()
+        if train_cfg.meanflow_compile_teacher:
+            object.__setattr__(
+                meanflow_teacher,
+                "_meanflow_compiled_forward",
+                torch.compile(
+                    meanflow_teacher.forward_with_encoded_conditions,
+                    dynamic=True,
+                    fullgraph=False,
+                ),
+            )
+
     if train_config_uses_lora(train_cfg) and is_main_process:
         trainable_params, total_params = count_parameters(raw_model)
         print(
@@ -3457,6 +4227,26 @@ def main() -> None:
             f"modules_to_save={train_cfg.lora_modules_to_save!r} "
             f"trainable={trainable_params:,}/{total_params:,}"
         )
+    if (
+        train_config_uses_lora(train_cfg)
+        and train_cfg.lora_frozen_base_bf16
+        and train_cfg.precision == "bf16"
+    ):
+        # Client 独自：固定の元の重みだけ bf16 にする（config.lora_frozen_base_bf16 の説明参照）。
+        # autocast が掛かっているので、計算は元から bf16。持ち方が変わるだけ。
+        cast = 0
+        for parameter in raw_model.parameters():
+            if (
+                not parameter.requires_grad
+                and parameter.is_floating_point()
+                and parameter.dtype == torch.float32
+            ):
+                parameter.data = parameter.data.to(torch.bfloat16)
+                cast += parameter.numel()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        if is_main_process:
+            print(f"Frozen base weights cast to bf16: {cast:,} params.")
     if train_cfg.speaker_inversion_enabled:
         init_embedding = None
         if train_cfg.speaker_inversion_init_embedding is not None:
@@ -3480,6 +4270,22 @@ def main() -> None:
                 "Speaker Inversion parameters initialized: "
                 f"embedding={tuple(speaker_inversion.embedding.shape)}."
             )
+    if meanflow_mode:
+        trainable_dit_params, frozen_params = freeze_for_meanflow(raw_model)
+        if trainable_dit_params == 0:
+            raise RuntimeError("No student DiT parameters were found for MeanFlow training.")
+        set_meanflow_frozen_modules_eval(raw_model)
+        if is_main_process:
+            print(
+                "MeanFlow distillation enabled: "
+                f"trainable_dit={trainable_dit_params:,} frozen={frozen_params:,} "
+                f"teacher_steps={train_cfg.teacher_steps} "
+                f"teacher_device={meanflow_teacher_device} "
+                f"teacher_chunk={train_cfg.meanflow_teacher_chunk_size} "
+                f"branch_batch={train_cfg.meanflow_teacher_branch_batch_size} "
+                f"fuse_base_branch={train_cfg.meanflow_teacher_fuse_base_branch} "
+                f"compile_teacher={train_cfg.meanflow_compile_teacher}."
+            )
     if train_cfg.train_mode == "duration_only":
         trainable_duration_params, frozen_params = freeze_for_duration_only(raw_model)
         if trainable_duration_params == 0:
@@ -3500,13 +4306,28 @@ def main() -> None:
                 "Speaker Inversion freeze applied: "
                 f"trainable={trainable_speaker_params:,} frozen={frozen_params:,}."
             )
+    if train_cfg.gradient_checkpointing_store_every < 0:
+        raise ValueError(
+            "gradient_checkpointing_store_every must be >= 0, "
+            f"got {train_cfg.gradient_checkpointing_store_every}"
+        )
     if train_cfg.gradient_checkpointing:
-        raw_model.set_gradient_checkpointing(True)
+        raw_model.set_gradient_checkpointing(
+            True, store_every=train_cfg.gradient_checkpointing_store_every
+        )
         if is_main_process:
             scope = "diffusion blocks"
             if model_cfg.use_pretrained_text_encoder:
                 scope += " and the pretrained text encoder (when supported)"
-            print(f"Gradient checkpointing enabled on {scope}.")
+            store_every = train_cfg.gradient_checkpointing_store_every
+            store_note = (
+                ""
+                if store_every == 0
+                else f" (activations kept for 1 of every {store_every} blocks)"
+            )
+            print(f"Gradient checkpointing enabled on {scope}{store_note}.")
+        if meanflow_mode and raw_model.pretrained_text_backbone is not None:
+            raw_model.pretrained_text_backbone.set_gradient_checkpointing(False)
     train_model = raw_model
     if train_cfg.compile_model:
         if not hasattr(torch, "compile"):
@@ -3563,7 +4384,11 @@ def main() -> None:
         )
         pretrained_lr = current_pretrained_text_encoder_lr(optimizer)
         if pretrained_lr is not None:
-            print(f"Pretrained text encoder optimizer=adamw lr={pretrained_lr:.3e}.")
+            print(
+                "Pretrained text encoder "
+                f"optimizer={train_cfg.pretrained_text_encoder_optimizer} "
+                f"lr={pretrained_lr:.3e}."
+            )
         if train_cfg.gradient_accumulation_steps > 1:
             print(
                 f"Gradient accumulation enabled: steps={train_cfg.gradient_accumulation_steps} (effective global batch={train_cfg.batch_size * world_size * train_cfg.gradient_accumulation_steps})."
@@ -3616,7 +4441,13 @@ def main() -> None:
         world_size=world_size,
         enabled=train_cfg.progress,
         show_all_ranks=train_cfg.progress_all_ranks,
-        description="Train Duration" if train_cfg.train_mode == "duration_only" else "Train RF",
+        description=(
+            "Train Duration"
+            if train_cfg.train_mode == "duration_only"
+            else "Train MeanFlow"
+            if meanflow_mode
+            else "Train RF"
+        ),
     )
     accum_steps = int(train_cfg.gradient_accumulation_steps)
     global_batch_size = train_cfg.batch_size * world_size * accum_steps
@@ -3645,6 +4476,11 @@ def main() -> None:
 
     try:
         model.train()
+        if meanflow_mode:
+            set_meanflow_frozen_modules_eval(raw_model)
+            if meanflow_teacher is None:
+                raise RuntimeError("MeanFlow teacher was not initialized.")
+            meanflow_teacher.eval()
         if scheduler is not None and step == 0:
             # Ensure the very first optimizer step uses warmup-scaled LR.
             scheduler.step()
@@ -3656,6 +4492,11 @@ def main() -> None:
         accum_duration_mae_frames = torch.zeros((), device=device, dtype=torch.float32)
         accum_duration_group_totals = torch.zeros(
             DURATION_CONDITION_GROUP_TOTAL_SIZE,
+            device=device,
+            dtype=torch.float64,
+        )
+        accum_duration_length_totals = torch.zeros(
+            DURATION_LENGTH_BUCKET_TOTAL_SIZE,
             device=device,
             dtype=torch.float64,
         )
@@ -3714,7 +4555,10 @@ def main() -> None:
                     x0 = batch["latent_patched"].to(device, non_blocking=True)
                     x_mask = batch["latent_mask_patched"].to(device, non_blocking=True)
                     x_mask_valid = batch["latent_mask_valid_patched"].to(device, non_blocking=True)
-                    if train_cfg.timestep_stratified:
+                    if meanflow_mode:
+                        t = None
+                        v_target = None
+                    elif train_cfg.timestep_stratified:
                         t = sample_stratified_logit_normal_t(
                             batch_size=bsz,
                             device=device,
@@ -3732,12 +4576,17 @@ def main() -> None:
                             t_min=train_cfg.timestep_min,
                             t_max=train_cfg.timestep_max,
                         )
-                    noise = torch.randn_like(x0)
-                    x_t = rf_interpolate(x0, noise, t)
-                    v_target = rf_velocity_target(x0, noise)
+                    if not meanflow_mode:
+                        noise = torch.randn_like(x0)
+                        x_t = rf_interpolate(x0, noise, t)
+                        v_target = rf_velocity_target(x0, noise)
 
                 text_cond_drop = torch.rand(bsz, device=device) < train_cfg.text_condition_dropout
-                if text_cond_drop.any() and not raw_model.cfg.use_duration_predictor:
+                if (
+                    text_cond_drop.any()
+                    and not raw_model.cfg.use_duration_predictor
+                    and not meanflow_mode
+                ):
                     text_mask = text_mask.clone()
                     text_mask[text_cond_drop] = False
                 caption_cond_drop = None
@@ -3753,11 +4602,12 @@ def main() -> None:
                     )
                     use_caption = has_caption & (~caption_cond_drop)
                     caption_drop_for_model = ~use_caption
-                    duration_caption_drop = (
-                        torch.rand(bsz, device=device) < train_cfg.duration_caption_dropout
-                    )
-                    duration_has_caption = has_caption & (~duration_caption_drop)
-                    if not raw_model.cfg.use_duration_predictor:
+                    if not meanflow_mode:
+                        duration_caption_drop = (
+                            torch.rand(bsz, device=device) < train_cfg.duration_caption_dropout
+                        )
+                        duration_has_caption = has_caption & (~duration_caption_drop)
+                    if not raw_model.cfg.use_duration_predictor and not meanflow_mode:
                         caption_mask = caption_mask & use_caption[:, None]
 
                 speaker_drop_for_model = None
@@ -3774,20 +4624,22 @@ def main() -> None:
                     else:
                         use_speaker = has_speaker & (~speaker_cond_drop)
                         speaker_drop_for_model = ~use_speaker
-                    duration_speaker_drop = (
-                        torch.rand(bsz, device=device) < train_cfg.duration_speaker_dropout
-                    )
-                    if train_cfg.speaker_inversion_enabled:
-                        duration_has_speaker = ~duration_speaker_drop
-                    else:
-                        duration_has_speaker = has_speaker & (~duration_speaker_drop)
-                    duration_features = set_duration_has_speaker_feature(
-                        duration_features,
-                        duration_has_speaker,
-                    )
+                    if not meanflow_mode:
+                        duration_speaker_drop = (
+                            torch.rand(bsz, device=device) < train_cfg.duration_speaker_dropout
+                        )
+                        if train_cfg.speaker_inversion_enabled:
+                            duration_has_speaker = ~duration_speaker_drop
+                        else:
+                            duration_has_speaker = has_speaker & (~duration_speaker_drop)
+                        duration_features = set_duration_has_speaker_feature(
+                            duration_features,
+                            duration_has_speaker,
+                        )
                     if (
                         not raw_model.cfg.use_duration_predictor
                         and not train_cfg.speaker_inversion_enabled
+                        and not meanflow_mode
                     ):
                         ref_mask = ref_mask & use_speaker[:, None]
                         ref_latent = ref_latent * use_speaker[:, None, None].to(ref_latent.dtype)
@@ -3795,12 +4647,41 @@ def main() -> None:
                 should_step = (accum_micro_steps % accum_steps) == 0
                 sync_context = model.no_sync() if distributed and not should_step else nullcontext()
                 with sync_context:
+                    meanflow_loss = None
                     with (
                         torch.autocast(device_type="cuda", dtype=torch.bfloat16)
                         if use_bf16
                         else nullcontext()
                     ):
-                        if duration_only:
+                        if meanflow_mode:
+                            if (
+                                meanflow_teacher is None
+                                or x0 is None
+                                or x_mask is None
+                                or x_mask_valid is None
+                            ):
+                                raise RuntimeError("MeanFlow training tensors are missing.")
+                            meanflow_loss = compute_meanflow_distillation_loss(
+                                model=model,
+                                teacher=meanflow_teacher,
+                                train_cfg=train_cfg,
+                                x0=x0,
+                                latent_mask=x_mask,
+                                valid_mask=x_mask_valid,
+                                text_ids=text_ids,
+                                text_mask=text_mask,
+                                ref_latent=ref_latent,
+                                ref_mask=ref_mask,
+                                caption_ids=caption_ids,
+                                caption_mask=caption_mask,
+                                text_drop=text_cond_drop,
+                                speaker_drop=speaker_drop_for_model,
+                                caption_drop=caption_drop_for_model,
+                                use_bf16=use_bf16,
+                            )
+                            v_pred = None
+                            duration_pred = None
+                        elif duration_only:
                             duration_pred = model(
                                 x_t=None,
                                 t=None,
@@ -3858,7 +4739,11 @@ def main() -> None:
                             duration_pred = None
 
                     rf_loss = torch.zeros((), device=device, dtype=torch.float32)
-                    if not duration_only:
+                    if meanflow_mode:
+                        if meanflow_loss is None:
+                            raise RuntimeError("MeanFlow loss is missing.")
+                        rf_loss = meanflow_loss
+                    elif not duration_only:
                         if (
                             v_pred is None
                             or v_target is None
@@ -3881,7 +4766,12 @@ def main() -> None:
                         device=device,
                         dtype=torch.float64,
                     )
-                    if raw_model.cfg.use_duration_predictor:
+                    duration_length_totals = torch.zeros(
+                        DURATION_LENGTH_BUCKET_TOTAL_SIZE,
+                        device=device,
+                        dtype=torch.float64,
+                    )
+                    if raw_model.cfg.use_duration_predictor and not meanflow_mode:
                         if duration_pred is None:
                             raise RuntimeError(
                                 "Duration predictor is enabled but duration_pred is missing."
@@ -3896,6 +4786,10 @@ def main() -> None:
                         duration_loss = duration_loss_per_sample.mean()
                         pred_frames = torch.expm1(duration_pred.float()).clamp_min(0.0)
                         duration_mae_frames = (pred_frames - num_frames.float()).abs().mean()
+                        duration_length_totals = duration_length_bucket_totals(
+                            pred_frames=pred_frames,
+                            target_frames=num_frames,
+                        )
                         if duration_only:
                             duration_group_totals = duration_condition_group_totals(
                                 duration_loss_per_sample=duration_loss_per_sample,
@@ -3919,6 +4813,7 @@ def main() -> None:
                 accum_duration_loss += duration_loss.detach()
                 accum_duration_mae_frames += duration_mae_frames.detach()
                 accum_duration_group_totals += duration_group_totals
+                accum_duration_length_totals += duration_length_totals
                 if not should_step:
                     continue
 
@@ -3927,11 +4822,13 @@ def main() -> None:
                 step_duration_loss = accum_duration_loss / float(accum_steps)
                 step_duration_mae_frames = accum_duration_mae_frames / float(accum_steps)
                 step_duration_group_totals = accum_duration_group_totals.clone()
+                step_duration_length_totals = accum_duration_length_totals.clone()
                 accum_loss.zero_()
                 accum_rf_loss.zero_()
                 accum_duration_loss.zero_()
                 accum_duration_mae_frames.zero_()
                 accum_duration_group_totals.zero_()
+                accum_duration_length_totals.zero_()
 
                 torch.nn.utils.clip_grad_norm_(model.parameters(), train_cfg.grad_clip_norm)
                 optimizer.step()
@@ -3965,6 +4862,15 @@ def main() -> None:
                         step_duration_mae_frames, world_size, distributed
                     ).item()
                     duration_group_metrics: dict[str, float] = {}
+                    duration_length_metrics: dict[str, float] = {}
+                    if raw_model.cfg.use_duration_predictor and not meanflow_mode:
+                        duration_length_totals = reduce_sum(
+                            step_duration_length_totals,
+                            distributed,
+                        )
+                        duration_length_metrics = duration_length_bucket_metrics(
+                            duration_length_totals
+                        )
                     if duration_only:
                         duration_group_totals = reduce_sum(
                             step_duration_group_totals,
@@ -3982,9 +4888,12 @@ def main() -> None:
                     }
                     if pretrained_lr_value is not None:
                         progress_metrics["text_lr"] = pretrained_lr_value
-                    if raw_model.cfg.use_duration_predictor:
+                    if raw_model.cfg.use_duration_predictor and not meanflow_mode:
                         progress_metrics["dur"] = duration_loss_value
                         progress_metrics["dur_mae"] = duration_mae_frames_value
+                        progress_metrics["dur_bias"] = duration_length_metrics[
+                            "duration_bias_frames"
+                        ]
                         if duration_only:
                             progress_metrics["dur_sp"] = duration_group_metrics[
                                 "duration_loss_speaker"
@@ -4007,11 +4916,12 @@ def main() -> None:
                         global_batch_size=global_batch_size,
                     )
                     if is_main_process:
-                        if raw_model.cfg.use_duration_predictor:
+                        if raw_model.cfg.use_duration_predictor and not meanflow_mode:
                             message = (
                                 f"step={step} loss={loss_value:.6f} rf={rf_loss_value:.6f} "
                                 f"dur={duration_loss_value:.6f} "
-                                f"dur_mae={duration_mae_frames_value:.2f}"
+                                f"dur_mae={duration_mae_frames_value:.2f} "
+                                f"dur_bias={duration_length_metrics['duration_bias_frames']:.2f}"
                             )
                             if duration_only:
                                 group_suffix = duration_condition_group_log_suffix(
@@ -4033,9 +4943,15 @@ def main() -> None:
                             }
                             if pretrained_lr_value is not None:
                                 metrics["train/pretrained_text_encoder_lr"] = pretrained_lr_value
-                            if raw_model.cfg.use_duration_predictor:
+                            if raw_model.cfg.use_duration_predictor and not meanflow_mode:
                                 metrics["train/duration_loss"] = duration_loss_value
                                 metrics["train/duration_mae_frames"] = duration_mae_frames_value
+                                metrics.update(
+                                    duration_length_bucket_wandb_metrics(
+                                        "train",
+                                        duration_length_metrics,
+                                    )
+                                )
                                 if duration_only:
                                     metrics.update(
                                         duration_condition_group_wandb_metrics(
@@ -4081,6 +4997,7 @@ def main() -> None:
                 ):
                     valid_metrics = run_validation(
                         model=model,
+                        teacher=meanflow_teacher,
                         loader=valid_loader,
                         train_cfg=train_cfg,
                         device=device,
@@ -4101,15 +5018,17 @@ def main() -> None:
                             epoch_step=epoch_step,
                         )
                     if is_main_process:
-                        if raw_model.cfg.use_duration_predictor:
+                        if raw_model.cfg.use_duration_predictor and not meanflow_mode:
                             message = (
-                                "valid step={} loss={:.6f} rf={:.6f} dur={:.6f} dur_mae={:.2f}"
+                                "valid step={} loss={:.6f} rf={:.6f} dur={:.6f} "
+                                "dur_mae={:.2f} dur_bias={:.2f}"
                             ).format(
                                 step,
                                 valid_metrics["loss"],
                                 valid_metrics["rf_loss"],
                                 valid_metrics["duration_loss"],
                                 valid_metrics["duration_mae_frames"],
+                                valid_metrics["duration_bias_frames"],
                             )
                             if duration_only:
                                 group_suffix = duration_condition_group_log_suffix(valid_metrics)
@@ -4135,11 +5054,17 @@ def main() -> None:
                                 "valid/loss": valid_metrics["loss"],
                                 "valid/rf_loss": valid_metrics["rf_loss"],
                             }
-                            if raw_model.cfg.use_duration_predictor:
+                            if raw_model.cfg.use_duration_predictor and not meanflow_mode:
                                 metrics["valid/duration_loss"] = valid_metrics["duration_loss"]
                                 metrics["valid/duration_mae_frames"] = valid_metrics[
                                     "duration_mae_frames"
                                 ]
+                                metrics.update(
+                                    duration_length_bucket_wandb_metrics(
+                                        "valid",
+                                        valid_metrics,
+                                    )
+                                )
                                 if duration_only:
                                     metrics.update(
                                         duration_condition_group_wandb_metrics(
@@ -4181,6 +5106,7 @@ def main() -> None:
         ):
             valid_metrics = run_validation(
                 model=model,
+                teacher=meanflow_teacher,
                 loader=valid_loader,
                 train_cfg=train_cfg,
                 device=device,
@@ -4201,15 +5127,17 @@ def main() -> None:
                     epoch_step=last_epoch_step,
                 )
             if is_main_process:
-                if raw_model.cfg.use_duration_predictor:
+                if raw_model.cfg.use_duration_predictor and not meanflow_mode:
                     message = (
-                        "valid final step={} loss={:.6f} rf={:.6f} dur={:.6f} dur_mae={:.2f}"
+                        "valid final step={} loss={:.6f} rf={:.6f} dur={:.6f} "
+                        "dur_mae={:.2f} dur_bias={:.2f}"
                     ).format(
                         step,
                         valid_metrics["loss"],
                         valid_metrics["rf_loss"],
                         valid_metrics["duration_loss"],
                         valid_metrics["duration_mae_frames"],
+                        valid_metrics["duration_bias_frames"],
                     )
                     if duration_only:
                         group_suffix = duration_condition_group_log_suffix(valid_metrics)
@@ -4235,9 +5163,15 @@ def main() -> None:
                         "valid/loss": valid_metrics["loss"],
                         "valid/rf_loss": valid_metrics["rf_loss"],
                     }
-                    if raw_model.cfg.use_duration_predictor:
+                    if raw_model.cfg.use_duration_predictor and not meanflow_mode:
                         metrics["valid/duration_loss"] = valid_metrics["duration_loss"]
                         metrics["valid/duration_mae_frames"] = valid_metrics["duration_mae_frames"]
+                        metrics.update(
+                            duration_length_bucket_wandb_metrics(
+                                "valid",
+                                valid_metrics,
+                            )
+                        )
                         if duration_only:
                             metrics.update(
                                 duration_condition_group_wandb_metrics(

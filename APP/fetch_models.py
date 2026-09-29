@@ -28,6 +28,12 @@ TARGETS = [
     # v4.1 は v4 の duration predictor だけを差し替えたもので、上流の推奨。
     # v4 も残すのは、既存の LoRA を作った条件で鳴らし直せるようにするため。
     ("Aratako/Irodori-TTS-v4.1-Small", "model.safetensors", "音声モデル v4.1"),
+    # v4-Large（3.29B、13.2GB）。テキストエンコーダ T5Gemma 2 の重みは本体に同梱。
+    # トークナイザは同じリポジトリの tokenizer/ にあり、本体と同じスナップショットに
+    # 置かれていれば、gated の google/t5gemma-2-1b-1b に取りに行かない。
+    ("Aratako/Irodori-TTS-v4-Large", "model.safetensors", "音声モデル v4-Large"),
+    ("Aratako/Irodori-TTS-v4-Large", "tokenizer/tokenizer.json", "音声モデル v4-Large(トークナイザ)"),
+    ("Aratako/Irodori-TTS-v4-Large", "tokenizer/tokenizer_config.json", "音声モデル v4-Large(トークナイザ設定)"),
     (
         "Aratako/Irodori-TTS-500M-v2-VoiceDesign",
         "model.safetensors",
@@ -88,8 +94,10 @@ TARGETS = [
 # from_hparams が「1つのフォルダに全部入っている」前提で読むため。
 # 上の TARGETS に載せられないのは、汎用の取得経路が .ckpt を除外していて、
 # ECAPA は重みが .ckpt しかないから。
+from data_paths import models_root
+
 ECAPA_REPO = "speechbrain/spkrec-ecapa-voxceleb"
-ECAPA_DIR = Path(__file__).resolve().parent.parent / "models" / "ecapa"
+ECAPA_DIR = models_root() / "ecapa"
 ECAPA_FILES = (
     "hyperparams.yaml",
     "embedding_model.ckpt",

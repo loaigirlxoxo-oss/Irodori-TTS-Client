@@ -29,6 +29,9 @@ git diff --name-status upstream/main -- irodori_tts/ configs/ train.py infer.py
 - 2026-08-18 に `upstream/main` の `8224daf`（Update default model to
   v4.1-Small）まで取り込んだ。
 - ファイルの欠落は無い。差分は下記の独自改変のみ。
+- 2026-09-29 に `upstream/main` の `89f9d8f`（Add MeanFlow distillation and
+  v4-Large support）を取り込んだ。README.md は Client 独自の内容なので当てていない。
+  衝突は無く、`inference_runtime.py` の独自改変はそのまま残っている。
 
 最初に突き合わせたときは `8224daf` が触った `README.md` / `docs/parameters.md` /
 `gradio_app.py` / `gradio_app_voicedesign.py` が旧内容のまま残っていた。
@@ -71,6 +74,26 @@ false で、他 14 ファイルは true。LoRA ジョブは 1 エポックが数
 false だとエポックの切れ目ごとに全ワーカーが破棄される。Windows は spawn
 なので起動のたびに torch を import し直し、GPU が待ちに入る
 （実測 36.5 秒/step → 3.3 秒/step）。
+
+### `train.py` / `irodori_tts/config.py`（v4-Large の LoRA 学習、2026-09-29）
+
+1. **LoRA でも同梱トークナイザを使う**（train.py）
+   上流は「チェックポイントの横の tokenizer/ を使う」処理を MeanFlow 蒸留のときだけ
+   通している。`--init-checkpoint` から始める学習（LoRA）でも通すようにした。
+   v4-Large のトークナイザ元 google/t5gemma-2-1b-1b は gated で、同意していない環境
+   では学習が起動直後に落ちた。tokenizer/ を同梱しない v4-Small 以前は何も変わらない。
+
+2. **`lora_frozen_base_bf16`**（config.py に項目追加、train.py で使う）
+   LoRA 学習で、動かさない元の重みを bf16 で持つ。既定は false（上流と同じ動き）。
+   v4-Large は fp32 のままだと元の重みだけで 13.2GB あり、16GB の GPU で溢れて
+   1 ステップも進まなかった（VRAM 15.9/16.3GB・使用率 100%）。
+
+### `configs/train_v4_large_lora.yaml`（新規、ベータ）
+
+上流に v4-Large の LoRA 用 config が無いので作った。model: は公開チェックポイントに
+埋め込まれた config_json の写し（ModelConfig に無い max_text_len など 3 項目は除く）。
+train: は train_v4_small_lora.yaml と同じで、勾配チェックポイントと
+`lora_frozen_base_bf16: true` を足した。上流が LoRA 用 config を出したら差し替える。
 
 ### `pyproject.toml` / `requirements.txt`（1 行）
 

@@ -197,12 +197,12 @@ def _load_model(
         codec_device=codec_device,
         codec_precision=codec_precision,
     )
-    _, reloaded = get_cached_runtime(runtime_key)
+    runtime, reloaded = get_cached_runtime(runtime_key)
     if reloaded:
         status = "loaded model into memory"
     else:
         status = "model already loaded; reused existing runtime"
-    return (
+    status_text = (
         f"{status}\n"
         f"checkpoint: {runtime_key.checkpoint}\n"
         f"model_device: {runtime_key.model_device}\n"
@@ -210,6 +210,7 @@ def _load_model(
         f"codec_device: {runtime_key.codec_device}\n"
         f"codec_precision: {runtime_key.codec_precision}"
     )
+    return status_text
 
 
 def _run_generation(
@@ -222,7 +223,7 @@ def _run_generation(
     uploaded_audio: object,
     uploaded_speaker_embedding: object,
     speaker_embedding_path_raw: str,
-    num_steps: int,
+    num_steps: str | None,
     num_candidates: int,
     seed_raw: str,
     seconds_raw: str,
@@ -262,6 +263,10 @@ def _run_generation(
         raise ValueError("num_candidates must be >= 1.")
     if requested_candidates > MAX_GRADIO_CANDIDATES:
         raise ValueError(f"num_candidates must be <= {MAX_GRADIO_CANDIDATES}.")
+
+    parsed_num_steps = _parse_optional_int(num_steps, "num_steps")
+    if parsed_num_steps is not None and parsed_num_steps < 1:
+        raise ValueError("num_steps must be >= 1 or blank.")
 
     cfg_scale = _parse_optional_float(cfg_scale_raw, "cfg_scale")
     truncation_factor = _parse_optional_float(truncation_factor_raw, "truncation_factor")
@@ -328,7 +333,7 @@ def _run_generation(
             duration_scale=float(duration_scale),
             max_ref_seconds=None,
             max_text_len=None,
-            num_steps=int(num_steps),
+            num_steps=parsed_num_steps,
             seed=None if seed is None else int(seed),
             cfg_guidance_mode=str(cfg_guidance_mode),
             cfg_scale_text=float(cfg_scale_text),
@@ -401,7 +406,7 @@ def build_ui() -> gr.Blocks:
         gr.Markdown("# Irodori-TTS Inference (Cached Runtime)")
         gr.Markdown(
             "Reference-audio cloning / Speaker Inversion UI. "
-            "Irodori-TTS-v4-Small is used by default; unchanged settings reuse the cached runtime."
+            "Irodori-TTS-v4.1-Small is used by default; unchanged settings reuse the cached runtime."
         )
 
         with gr.Row():
@@ -478,7 +483,12 @@ def build_ui() -> gr.Blocks:
 
         with gr.Accordion("Sampling", open=True):
             with gr.Row():
-                num_steps = gr.Slider(label="Num Steps", minimum=1, maximum=120, value=40, step=1)
+                num_steps = gr.Textbox(
+                    label="Num Steps",
+                    value="",
+                    placeholder="Auto (RF: 40, MeanFlow: 4)",
+                    info="Blank: model default (RF: 40, MeanFlow: 4).",
+                )
                 num_candidates = gr.Slider(
                     label="Num Candidates",
                     minimum=1,

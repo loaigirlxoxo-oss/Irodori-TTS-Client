@@ -20,7 +20,7 @@ dependencies = [
     # cp311 まで／0.2.0 には cp312 がある）。Radeon 版 PyTorch は Windows では
     # cp312 のみの配布なので上限を外す。実測で生成にも学習にも不要。
     "sentencepiece>=0.1.99",
-    "silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152",
+    "silentcipher @ https://github.com/SesameAILabs/silentcipher/archive/d46d7d0893a583d8968ab3a6626e2289faec9152.tar.gz",
     "torch>=2.10.0",
     "torchaudio>=2.10.0",
     "torchcodec>=0.10.0,<0.11.0",

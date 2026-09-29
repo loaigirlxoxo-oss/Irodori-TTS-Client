@@ -55,3 +55,9 @@ APP/_ids.txt
 
 # かんたん学習が残す402本（作業用・作り直せる）
 /APP/easy_samples/
+
+# ビルド時に取ってくる埋め込み Python（24MB・再取得できる）
+/APP/build/python-embed/
+
+# electron-builder の出力（インストーラ本体）
+/dist/

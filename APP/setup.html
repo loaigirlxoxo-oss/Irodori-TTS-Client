@@ -1,0 +1,157 @@
+<title>Irodori-TTS Client のセットアップ</title>
+<style>
+  /* 本体（theme.css）と同じ言い回しで組む。
+     純黒の地、金は塗らずに線で使う、角は落とさない、字は夜永オールド明朝。
+     起動の最初に一度だけ出る画面なので theme.css は読み込まず、
+     必要な値だけここに持たせている。 */
+  @font-face {
+    font-family:"Yonaga";
+    src:url("assets/YonagaOldMincho-Bold.woff2") format("woff2");
+    font-weight:400 700; font-display:swap;
+  }
+
+  :root {
+    color-scheme:dark;
+    --l0:#000000;
+    --text:#e9ecf2; --muted:#959daf; --faint:#5c6478;
+    --line:#21252e;
+    --gold:#c9a86a; --gold-dim:rgba(201,168,106,.34);
+  }
+
+  *,*::before,*::after { box-sizing:border-box; margin:0; padding:0; }
+
+  body {
+    font-family:"Yonaga","Segoe UI","Yu Gothic UI",serif;
+    font-size:13.5px; line-height:1.6; color:var(--text);
+    height:100vh; overflow:hidden; -webkit-font-smoothing:antialiased;
+    /* 本体と同じ、左上と右下のごく薄い光 */
+    background:
+      radial-gradient(1100px 700px at 8% -10%, rgba(201,168,106,.02), transparent 60%),
+      radial-gradient(900px 600px at 100% 108%, rgba(107,181,200,.016), transparent 62%),
+      var(--l0);
+    display:flex; flex-direction:column;
+  }
+
+  /* ══ ヘッダ ══ 本体の .hdr と同じ作り */
+  .hdr {
+    display:flex; align-items:center; gap:9px;
+    height:52px; padding:0 18px; flex-shrink:0;
+    background:linear-gradient(180deg, rgba(255,255,255,.016), transparent), var(--l0);
+    border-bottom:1px solid var(--line); position:relative;
+  }
+  .hdr::after {
+    content:""; position:absolute; left:0; right:0; bottom:-1px; height:1px;
+    background:linear-gradient(90deg,transparent,var(--gold-dim) 12%,var(--gold-dim) 88%,transparent);
+  }
+  .hdr .mk { width:26px; height:26px; display:block; }
+  .hdr .wm { height:27px; display:block; opacity:.92; }
+
+  main { flex:1; padding:24px 30px 0; min-height:0; }
+
+  h1 { font-size:17px; font-weight:400; letter-spacing:.12em; margin-bottom:18px; }
+
+  /* ══ 四芒星の区切り ══ 本体の .rule と同じ */
+  .rule { display:flex; align-items:center; gap:10px; padding:2px 0 6px; opacity:.55; }
+  .rule::before, .rule::after {
+    content:""; flex:1; height:1px;
+    background:linear-gradient(90deg,transparent,var(--gold-dim) 22%,var(--gold-dim) 78%,transparent);
+  }
+  .rule i {
+    width:11px; height:11px; flex-shrink:0; background:var(--gold);
+    clip-path:polygon(50% 0,58% 42%,100% 50%,58% 58%,50% 100%,42% 58%,0 50%,42% 42%);
+    filter:drop-shadow(0 0 5px var(--gold-dim));
+  }
+
+  /* ══ 工程 ══ 角は落とさない。済みは金の細線、これからは沈める */
+  .steps { list-style:none; margin:2px 0 16px; }
+  .steps li {
+    display:flex; align-items:center; gap:13px;
+    padding:6px 0; color:var(--faint); transition:color .3s;
+  }
+  .steps li .mark {
+    width:22px; height:22px; flex:0 0 22px;
+    border:1px solid var(--line);
+    display:grid; place-items:center;
+    font-size:11px; color:var(--faint);
+    transition:border-color .3s, color .3s;
+  }
+  .steps li.doing { color:var(--text); }
+  .steps li.doing .mark { border-color:var(--gold); color:var(--gold); }
+  .steps li.done { color:var(--muted); }
+  .steps li.done .mark { border-color:var(--gold-dim); color:var(--gold-dim); }
+
+  /* ══ 進み具合 ══ 面ではなく細い線で見せる */
+  .bar { height:2px; background:var(--line); }
+  .bar i { display:block; height:100%; width:0; background:var(--gold); transition:width .4s; }
+
+  #detail {
+    margin-top:12px; height:4.2em; overflow:hidden;
+    font-family:"Cascadia Mono",Consolas,monospace;
+    font-size:11px; line-height:1.5; color:var(--faint);
+    white-space:pre-wrap; word-break:break-all;
+  }
+
+  footer { flex-shrink:0; padding:0 30px 22px; color:var(--faint); font-size:12px; }
+
+  .err {
+    margin:14px 30px 0; padding:11px 13px; display:none;
+    background:rgba(208,102,102,.06); border:1px solid rgba(208,102,102,.45);
+    color:#d79a9a; font-size:12px; white-space:pre-wrap;
+  }
+</style>
+
+<div class="hdr">
+  <img class="mk" src="assets/mark.png" alt="">
+  <img class="wm" src="assets/logo.png" alt="Irodori-TTS">
+</div>
+
+<main>
+  <h1>はじめの準備をしています</h1>
+
+  <ul class="steps">
+    <li id="s1"><span class="mark">1</span><span>ランタイムを用意する</span></li>
+    <li id="s2"><span class="mark">2</span><span>ライブラリを入れる</span></li>
+    <li id="s3"><span class="mark">3</span><span>音声モデルを取得する（約30GB）</span></li>
+  </ul>
+
+  <div class="rule"><i></i></div>
+
+  <div class="bar"><i id="bar"></i></div>
+  <div id="detail"></div>
+</main>
+
+<div id="err" class="err"></div>
+
+<footer>
+  回線の速さにもよりますが、30分から1時間ほどかかります。<br>
+  途中で閉じても、次に開いたときに続きからやり直します。
+</footer>
+
+<script>
+  const els = [null, document.getElementById('s1'), document.getElementById('s2'), document.getElementById('s3')];
+  const bar = document.getElementById('bar');
+  const detail = document.getElementById('detail');
+  const err = document.getElementById('err');
+
+  window.irodoriSetup.onProgress((p) => {
+    // 済んだ工程は飛ばされることもある（モデルが既にあるなど）。
+    // 最後の合図では、工程名を書き換えずに全部を済みにする。
+    if (p.final) {
+      for (let i = 1; i <= 3; i++) els[i].className = 'done';
+      bar.style.width = '100%';
+      detail.textContent = p.detail || '';
+      return;
+    }
+    for (let i = 1; i <= 3; i++) {
+      els[i].className = i < p.index ? 'done' : i === p.index ? 'doing' : '';
+    }
+    bar.style.width = `${Math.round(((p.index - 1) / p.total) * 100)}%`;
+    els[p.index].lastElementChild.textContent = p.step;
+    if (p.detail !== undefined) detail.textContent = p.detail;
+  });
+
+  window.irodoriSetup.onError((message) => {
+    err.style.display = 'block';
+    err.textContent = message;
+  });
+</script>

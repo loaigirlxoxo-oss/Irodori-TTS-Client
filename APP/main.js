@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, dialog, nativeTheme, shell } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
+const runtime = require('./runtime');
 const fs = require('fs');
 const net = require('net');
 const crypto = require('crypto');
@@ -44,11 +45,69 @@ async function findFreePort() {
 // Python's server reads IRODORI_DATA_DIR and uses the same convention.
 // Legacy `APP/references` + `APP/metadata.json` get migrated to
 // `<data_root>/voices/` automatically on first server start.
+//
+// ただしインストーラは「すべてのユーザー用」も選べるので、Program Files の
+// ような書けない場所に入ることがある。そこに data を作ろうとすると、初回の
+// ランタイム作成も pip も権限で落ちる。書けないときは利用者ごとの領域へ逃がす。
+// どちらを使ったかは必ずログに出す。黙って別の場所を使うと、出力を探す人が迷う。
+let dataRootCache = null;
 function getDataRoot() {
+  if (!app.isPackaged) return __dirname;
+  if (dataRootCache) return dataRootCache;
+  const beside = path.join(path.dirname(app.getPath('exe')), 'data');
+  if (isWritableDir(beside)) {
+    dataRootCache = beside;
+  } else {
+    dataRootCache = path.join(app.getPath('userData'), 'data');
+    console.warn(`[Electron] ${beside} に書けないので ${dataRootCache} を使います`);
+  }
+  console.log(`[Electron] data root: ${dataRootCache}`);
+  return dataRootCache;
+}
+
+// 実際に作って書いてみる。存在と権限を別々に調べても、ネットワーク越しや
+// 仮想化されたフォルダでは当てにならない。
+function isWritableDir(dir) {
+  try {
+    fs.mkdirSync(dir, { recursive: true });
+    const probe = path.join(dir, `.write-test-${process.pid}`);
+    fs.writeFileSync(probe, '');
+    fs.unlinkSync(probe);
+    return true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// Python のソース置き場。
+//   開発中     : APP/            （リポジトリをそのまま動かす）
+//   パッケージ : resources/backend/APP/
+// server.py は親を PROJECT_ROOT として irodori_tts を読むので、この2階層は
+// パッケージ側でも同じ形に並べてある。
+function getBackendDir() {
   return app.isPackaged
-    ? path.join(path.dirname(app.getPath('exe')), 'data')
+    ? path.join(process.resourcesPath, 'backend', 'APP')
     : __dirname;
 }
+
+// 使う Python。
+//   開発中     : リポジトリの .venv（setup.bat が作ったもの）
+//   パッケージ : data/runtime/python（初回起動で作る。同梱の埋め込み版を写す）
+// どちらも無ければ PATH の python に落ちる。
+function getPythonExe() {
+  const packaged = path.join(getDataRoot(), 'runtime', 'python', 'python.exe');
+  if (fs.existsSync(packaged)) return packaged;
+  const venv = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
+  return fs.existsSync(venv) ? venv : 'python';
+}
+
+// モデルの置き場。開発中はリポジトリ直下、パッケージ版は data の下。
+function getModelsDir() {
+  return app.isPackaged
+    ? path.join(getDataRoot(), 'models')
+    : path.join(__dirname, '..', 'models');
+}
+
 function getRefsDir()     { return path.join(getDataRoot(), 'voices'); }
 function getMetadataPath(){ return path.join(getRefsDir(), 'metadata.json'); }
 function getOutputsDir()  { return path.join(getDataRoot(), 'outputs'); }
@@ -74,9 +133,10 @@ function ensureDataLayout() {
 function startPythonServer(port) {
   console.log('[Electron] Starting Python FastAPI server...');
 
-  // Use the project's local .venv python directly (no uv needed).
-  const venvPython = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
-  const pythonExe = fs.existsSync(venvPython) ? venvPython : 'python';
+  // 同梱ランタイムは sys.path が固定されているので、隣のモジュールを読める
+  // ようにしてから起動する。古い版から更新したときもここで直る。
+  runtime.ensurePathFix(getDataRoot());
+  const pythonExe = getPythonExe();
   console.log(`[Electron] Python executable: ${pythonExe}`);
 
   // Writable data dir co-located with the launcher (portable layout).
@@ -85,10 +145,12 @@ function startPythonServer(port) {
   console.log(`[Electron] IRODORI_PORT: ${port}`);
 
   pythonProcess = spawn(pythonExe, ['server.py'], {
-    cwd: __dirname,
+    cwd: getBackendDir(),
     shell: false,
+    // pyEnv で利用者の user site-packages / PYTHONPATH を外す。同梱ランタイム
+    // だけを見せないと、別バージョンの torch などを拾って起動に失敗する。
     env: {
-      ...process.env,
+      ...runtime.pyEnv(),
       PYTHONUNBUFFERED: '1',
       IRODORI_DATA_DIR: dataDir,
       IRODORI_PORT: String(port),
@@ -97,8 +159,13 @@ function startPythonServer(port) {
       // electron-builder で作った .exe から起動すると既定の
       // ~/.cache/huggingface を見に行き、新規インストール機では全モデルが
       // 「見つかりません」になる。
-      // 起動.bat 経由のときはそちらの指定を尊重する。
-      HF_HOME: process.env.HF_HOME || path.join(__dirname, '..', 'models'),
+      // パッケージ版では利用者の HF_HOME を見ない。セットアップは必ず
+      // data\models へ取りに行くので、起動時だけ別のキャッシュを見ると
+      // 「取得は終わったのにモデルが無い」になる。
+      // 開発中（起動.bat など）は、そちらの指定を尊重する。
+      HF_HOME: app.isPackaged ? getModelsDir() : (process.env.HF_HOME || getModelsDir()),
+      // HF のキャッシュ構造に乗らないもの（ECAPA・手で置く重み）の置き場。
+      IRODORI_MODELS_DIR: getModelsDir(),
     }
   });
 
@@ -121,6 +188,21 @@ function startPythonServer(port) {
   pythonProcess.on('close', (code) => {
     console.log(`[Python] API process exited with code ${code}`);
   });
+}
+
+// 初回の準備を見せる小さい窓。準備が済んだら閉じて本体を開く。
+//
+// 読み込みの完了を待ってから返す。待たずに進捗を送ると、画面側が
+// 受け口を用意する前に最初の1通が飛び、工程1が出ないまま進む。
+async function createSetupWindow() {
+  const win = new BrowserWindow({
+    width: 620, height: 430, resizable: false,
+    backgroundColor: '#000000',
+    webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true }
+  });
+  win.removeMenu();
+  await win.loadFile('setup.html');
+  return win;
 }
 
 function createWindow() {
@@ -179,8 +261,44 @@ app.whenReady().then(async () => {
     return;
   }
   console.log(`[Electron] API port: ${apiPort}`);
+
+  // 初回だけ、Python のランタイムとモデルを用意する。
+  // setup.bat でやっていたことをここへ移した。何がどこまで進んだかを
+  // 画面に出さないと、止まっているのか動いているのか分からない。
+  // パッケージ版だけ。開発中はリポジトリの .venv と models を使う（setup.bat の流儀）。
+  // ここを通すと、.venv があるのに runtime の一式をもう一組作ってしまう。
+  let setupWin = null;
+  if (app.isPackaged
+      && !runtime.isReady({ dataRoot: getDataRoot(), backendDir: getBackendDir(), isPackaged: app.isPackaged })) {
+    const win = await createSetupWindow();
+    setupWin = win;
+    try {
+      await runtime.ensureRuntime({
+        dataRoot: getDataRoot(),
+        backendDir: getBackendDir(),
+        isPackaged: app.isPackaged,
+        onProgress: (p) => { if (!win.isDestroyed()) win.webContents.send('setup-progress', p); }
+      });
+    } catch (err) {
+      const message = String(err && err.message ? err.message : err);
+      console.error('[Electron] セットアップに失敗:', message);
+      if (!win.isDestroyed()) win.webContents.send('setup-error', message);
+      dialog.showErrorBox('準備に失敗しました',
+        `${message}
+
+通信を確かめて、もう一度起動してください。` +
+        '途中まで取得したものは残っているので、続きからやり直します。');
+      return;               // 窓は開けたままにして、何が起きたか読ませる
+    }
+  }
+
   startPythonServer(apiPort);
   createWindow();
+  // セットアップ画面は、本体の窓を作ってから閉じる。先に閉じると、窓が 0 に
+  // なった瞬間に window-all-closed → app.quit() が走り、本体が出ないまま終わる。
+  // いまは close() と createWindow() が同じ流れで続くので起きないが、間に await が
+  // 1つ入るだけで起きる（Codex の指摘。順番の再現テストで確認）。
+  if (setupWin && !setupWin.isDestroyed()) setupWin.close();
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) createWindow();
@@ -196,6 +314,10 @@ app.on('window-all-closed', function () {
 });
 
 app.on('will-quit', () => {
+  // セットアップ中の pip やモデル取得は、画面を閉じても親が終わるまで残る。
+  // 置き去りにすると、次の起動と同じランタイム・同じ HF キャッシュへ
+  // 2つのプロセスが同時に書き込む。
+  runtime.stopAll();
   if (pythonProcess) {
     console.log("[Electron] Killing Python process...");
     // Force kill child process on Windows
@@ -218,6 +340,21 @@ ipcMain.handle('get-voices', async () => {
 // 開く先がずれると「置いたのに出ない」の原因が追えなくなる。
 ipcMain.handle('open-voices-folder', async () => {
   const dir = getRefsDir();
+  fs.mkdirSync(dir, { recursive: true });
+  const err = await shell.openPath(dir);
+  if (err) throw new Error(err);
+  return dir;
+});
+
+// 生成した音声の既定の置き場。保存先を選んでいないときはここに溜まる。
+// 画面には「保存先: 未設定」としか出ていなかったので、どこへ保存されたのか
+// 分からなかった。インストール先が書けないと %APPDATA% 側へ逃げるので、
+// 道すじを決め打ちで案内することもできない。実際の場所を返して画面に出す。
+ipcMain.handle('get-outputs-dir', async () => getOutputsDir());
+
+// 保存先を開く。選んでいればそのフォルダ、選んでいなければ既定の置き場。
+ipcMain.handle('open-save-folder', async (event, folder) => {
+  const dir = folder && fs.existsSync(folder) ? folder : getOutputsDir();
   fs.mkdirSync(dir, { recursive: true });
   const err = await shell.openPath(dir);
   if (err) throw new Error(err);
@@ -389,14 +526,15 @@ ipcMain.handle('select-folder', async () => {
 ipcMain.handle('select-audio-files', async () => {
   const { canceled, filePaths } = await dialog.showOpenDialog(mainWindow, {
     properties: ['openFile', 'multiSelections'],
-    filters: [{ name: 'Audio (wav / ogg)', extensions: ['wav', 'ogg'] }],
+    filters: [{ name: 'Audio (wav / mp3 / flac / ogg)', extensions: ['wav', 'mp3', 'flac', 'ogg'] }],
     title: 'Select source audio file(s) for the dataset'
   });
   if (canceled) return [];
   return filePaths;
 });
 
-// Recursively collect wav files under `dir`, capped to prevent runaways.
+// Recursively collect audio files under `dir`, capped to prevent runaways.
+// 読み込みは soundfile なので wav 以外も通る。かんたん学習側と同じ4種を受ける。
 function enumerateWavs(dir, depth, maxDepth, out, cap) {
   if (out.length >= cap) return;
   let entries;
@@ -410,7 +548,7 @@ function enumerateWavs(dir, depth, maxDepth, out, cap) {
     const full = path.join(dir, ent.name);
     if (ent.isDirectory()) {
       if (depth < maxDepth) enumerateWavs(full, depth + 1, maxDepth, out, cap);
-    } else if (ent.isFile() && /\.(wav|ogg)$/i.test(ent.name)) {
+    } else if (ent.isFile() && /\.(wav|mp3|flac|ogg)$/i.test(ent.name)) {
       out.push(full);
     }
   }
@@ -698,13 +836,24 @@ function aozNormalizeText(text) {
     .trim();
 }
 
-ipcMain.handle('aozora-download', async (event, arg) => {
-  const { txtUrl, title, author, encoding } = arg || {};
+// 本文を取ってきて整える。保存と冒頭の確認の両方で使う
+async function aozFetchText(txtUrl, encoding) {
   const res = await aozFetch(txtUrl);
   const buf = Buffer.from(await res.arrayBuffer());
   const enc = String(encoding || '').includes('Unicode') ? 'utf-8' : 'shift-jis';
-  const rawText = aozUnzipFirst(buf, enc);
-  const normalized = aozNormalizeText(rawText);
+  return aozNormalizeText(aozUnzipFirst(buf, enc));
+}
+
+// 保存する前に冒頭を見せる。選んだ作品が合っているか確かめるため
+ipcMain.handle('aozora-preview', async (event, arg) => {
+  const { txtUrl, encoding } = arg || {};
+  const text = await aozFetchText(txtUrl, encoding);
+  return { head: text.trim().slice(0, 300) };
+});
+
+ipcMain.handle('aozora-download', async (event, arg) => {
+  const { txtUrl, title, author, encoding } = arg || {};
+  const normalized = await aozFetchText(txtUrl, encoding);
   const dir = getNovelsDir();
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   const name = nocSanitizeFilename([author, title].filter(Boolean).join('_') || 'aozora');

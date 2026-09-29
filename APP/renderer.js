@@ -58,7 +58,7 @@ const isVoiceDesignModel = m => VOICE_DESIGN_MODELS.includes(String(m));
 // 説明文（キャプション）で声を指定できるモデル。VoiceDesign 専用ではない。
 // v4 系は設定が use_caption_condition: true で、重みにも caption 用の層が入る。
 // server.py の _CAPTION_MODELS と同じ顔ぶれにすること。
-const CAPTION_MODELS = ['v4_1', 'v4_1_anime', 'v4'];
+const CAPTION_MODELS = ['v4_1', 'v4_1_anime', 'v4', 'v4_large'];
 const acceptsCaption = m => isVoiceDesignModel(m) || CAPTION_MODELS.includes(String(m));
 
 // VoiceDesign は説明文が要る。v4 系は書かなくても鳴る。
@@ -77,7 +77,8 @@ function syncCaptionField(modelType) {
 
 // v4 系（v4-Small と v4.1-Small）。v4.1 は duration predictor だけを
 // 差し替えたもので、条件づけの作りは v4 と同じ。
-const V4_MODELS = ['v4', 'v4_1', 'v4_1_anime'];
+// v4-Large も絵文字の注釈（📖 など）を受け付ける v4 世代。
+const V4_MODELS = ['v4', 'v4_1', 'v4_1_anime', 'v4_large'];
 const isV4Model = m => V4_MODELS.includes(String(m));
 
 const NARRATION_EMOJI = '📖';
@@ -152,15 +153,99 @@ const valDurationScale = document.getElementById('val-duration-scale');
 //      → 連続 n 文字を 1 + (n-1)*0.70 として数える。
 // 未使用の98文で検証して誤差 中央値0.47秒・p90 1.33秒。
 // （手書き例文18文だけで作った旧係数はオホ声で中央値1.96秒外していた）
-// 長さは duration_scale に比例するので、基準との比で伸縮させる。
-// 0.75 は係数を実測したときの scale であって既定値ではない。既定を 1.0 に
-// 変えてもここは動かさない（動かすと実測との対応が崩れて予測がずれる）。
+// 長さは duration_scale に比例するので、そのまま掛ける。
+// 以前は (scale / 0.75) を掛けていたが、係数は話速 1.00 の音で合っている
+// （実測: 係数そのままの値 2.51/4.51/7.01 に対し、話速1.00 の実測
+// 2.36/4.48/6.60）。既定の 1.00 で 1.33倍に膨らみ、22字以上の文で
+// 中央値 1.65〜2.75秒 長く出ていた。
 const SEC_PER_UNIT = 0.1782;
 const SEC_INTERCEPT = 0.327;
 const REPEAT_WEIGHT = 0.70;
 const PUNCT_WEIGHT = 1.25;
 const PUNCT_RE = /[、。！？，．,.!?…]/;
-const DURATION_SCALE_BASE = 0.75;
+// 絵文字は「感情・演出タグ」だが、無音の印ではない。演技がそのまま音になる
+// ぶん尺が伸びる。45種それぞれ、素の文に1つ足して実測した伸び（秒・中央値）。
+//
+// 測り方: v4.1-Small・素のモデル・話速1.00。22字と23字の文 × 種2 の 4回を
+// 引き、文字起こしで行を言えていることを確かめてから素との差を取った
+// （演出タグは咳・あくび・鼻歌など台本に無い音を出すので、単純な CER だと
+// 正常な演技を捏造と取り違える。頭と尻の挿入を無料にした編集距離で判定した）。
+// 45種とも 4/4 使えている。
+//
+// 伸びは -0.08秒（早口）から +1.82秒（舐める音）まで開く。一律の重みでは
+// 足りないので表で持つ。重ねたときはおおむね足し算になる（😊😏🤭 の実測
+// +2.40秒 に対し、表の合計 +2.26秒）。
+//
+// 測っていないこと: 文の途中に置いたとき、同じ絵文字を並べたとき、
+// LoRA を当てたとき。いずれも差が出るかもしれない。
+const EMOJI_SEC = {
+  '👅': 1.82, // 舐める音,
+  '🥵': 1.70,    // 喘ぎ,
+  '😮‍💨': 1.66,    // 吐息,
+  '🤧': 1.56,  // 咳・鼻,
+  '🤭': 1.54,    // 笑い,
+  '😮': 1.42, // 息をのむ,
+  '💋': 1.38, // リップノイズ,
+  '🥤': 1.38, // 飲み込む,
+  '🌬️': 1.30,  // 息切れ,
+  '🎵': 1.22,    // 鼻歌,
+  '🥱': 1.08,  // あくび,
+  '🤔': 1.04,    // 疑問,
+  '😪': 1.02,  // 眠そう,
+  '😒': 0.98,  // 舌打ち,
+  '⏸️': 0.96,      // 間,
+  '👌': 0.86,    // 相槌,
+  '😌': 0.86,    // 安堵,
+  '📢': 0.80,  // エコー,
+  '🤐': 0.80, // 口を塞ぐ,
+  '👂': 0.76,    // 囁き,
+  '😎': 0.76,  // 得意げ,
+  '🥺': 0.74,  // 震え声,
+  '💪': 0.74,  // 力強く,
+  '👃': 0.68,  // 嗅ぐ音,
+  '😭': 0.64,  // 泣き声,
+  '🙄': 0.64,    // 呆れ,
+  '🐢': 0.58, // ゆっくり,
+  '😊': 0.56,  // 楽しげ,
+  '🥴': 0.54,    // 酔う,
+  '💥': 0.40, // 勢いよく,
+  '😆': 0.32,    // 喜び,
+  '😴': 0.30,    // 寝言,
+  '😲': 0.30,    // 驚き,
+  '📖': 0.30,    // 朗読,
+  '🫶': 0.28,  // 優しく,
+  '😱': 0.22,    // 悲鳴,
+  '😠': 0.20,    // 怒り,
+  '😟': 0.20,    // 心配,
+  '🫣': 0.20,    // 照れ,
+  '📞': 0.18, // 電話越し,
+  '😏': 0.16, // からかう,
+  '😖': 0.16,  // 苦しげ,
+  '🙏': 0.16,    // 懇願,
+  '😰': 0.06,  // 慌てる,
+  '⏩': -0.08,    // 早口
+};
+const EMOJI_SEC_DEFAULT = 0.74;   // 一覧に無い絵文字
+const EMOJI_KEYS = Object.keys(EMOJI_SEC).sort((a, b) => b.length - a.length);
+const EMOJI_RE = /\p{Extended_Pictographic}|[\u200D\uFE0F]/u;
+
+// 絵文字ぶんの秒。😮‍💨 のように複数のコードポイントで1つの絵文字になるものが
+// あるので、長い並びから順に取り除く。コードポイントで数えると二重に足す。
+function emojiSeconds(text) {
+  let rest = text.normalize('NFC');
+  let total = 0;
+  for (const e of EMOJI_KEYS) {
+    let i;
+    while ((i = rest.indexOf(e)) >= 0) {
+      total += EMOJI_SEC[e];
+      rest = rest.slice(0, i) + rest.slice(i + e.length);
+    }
+  }
+  for (const ch of Array.from(rest)) {
+    if (/\p{Extended_Pictographic}/u.test(ch)) total += EMOJI_SEC_DEFAULT;
+  }
+  return total;
+}
 
 // 表記上の文字数ではなく、発話にかかる「単位数」を数える。
 // text[i] は UTF-16 単位なので、絵文字などのサロゲートペアが2単位に割れて
@@ -175,9 +260,12 @@ function speechUnits(text) {
     const run = j - i;
     // 句読点も連続すれば詰まって発音される（「……」「！！！」）ので、
     // 文字と同じく連続ぶんを圧縮したうえで句読点の重みを掛ける。
-    total += PUNCT_RE.test(ch)
-      ? PUNCT_WEIGHT * (1 + (run - 1) * REPEAT_WEIGHT)
-      : 1 + (run - 1) * REPEAT_WEIGHT;
+    // 絵文字の尺は emojiSeconds で別に足す。ここでは数えない
+    if (!EMOJI_RE.test(ch)) {
+      total += PUNCT_RE.test(ch)
+        ? PUNCT_WEIGHT * (1 + (run - 1) * REPEAT_WEIGHT)
+        : 1 + (run - 1) * REPEAT_WEIGHT;
+    }
     i = j;
   }
   return total;
@@ -216,7 +304,8 @@ function updateDurationEstimate() {
   if (!text || !isV4Model(model)) { est.textContent = ''; return; }
   // 切片が正なので現係数では下限に当たらないが、係数を差し替えたときに
   // 負値やゼロを表示しないためのガードとして残す。
-  const sec = Math.max(0.3, SEC_PER_UNIT * speechUnits(text) + SEC_INTERCEPT) * (scale / DURATION_SCALE_BASE);
+  const sec = Math.max(0.3, SEC_PER_UNIT * speechUnits(text) + SEC_INTERCEPT
+                            + emojiSeconds(text)) * scale;
   est.textContent = ` / 予測 約${sec.toFixed(1)}秒`;
 }
 const paramCfgSpeaker = document.getElementById('param-cfg-speaker');
@@ -354,8 +443,8 @@ function lineSeconds(text) {
   const t = (text || '').replace(/\s/g, '');
   if (!t) return 0;
   const scale = parseFloat(paramDurationScale.value);
-  return Math.max(0.3, SEC_PER_UNIT * speechUnits(t) + SEC_INTERCEPT)
-       * (scale / DURATION_SCALE_BASE);
+  return Math.max(0.3, SEC_PER_UNIT * speechUnits(t) + SEC_INTERCEPT
+                     + emojiSeconds(t)) * scale;
 }
 
 // 行ごとの「字数・予測秒」と、足の「行数・合計秒」を書き直す。
@@ -609,20 +698,28 @@ function setupSynthSaveFolder() {
   const btn      = document.getElementById('synth-save-folder-btn');
   const clearBtn = document.getElementById('synth-save-folder-clear');
   if (!pathEl || !btn || !clearBtn) return;
+  // 選んでいなくても、音声はアプリの既定の置き場に溜まる。以前は「未設定」と
+  // だけ出していたので、どこへ保存されたのか探す手がかりが無かった。
+  // インストール先が書けないと %APPDATA% 側へ逃げるため、道すじを決め打ちで
+  // 案内することもできない。main に実際の場所を聞いて出す。
+  let defaultDir = '';
   function update(folder) {
-    if (folder) {
-      // 見出しの中に置くので、full path だと幅を食い潰す。
-      // 末尾のフォルダ名だけ出し、全体は title で見せる。
-      pathEl.textContent = '保存先: ' + folder.split(/[\\/]/).filter(Boolean).pop();
-      pathEl.title = folder;
-      clearBtn.classList.remove('hidden');
-    } else {
-      pathEl.textContent = '保存先: 未設定';
-      pathEl.title = '';
-      clearBtn.classList.add('hidden');
-    }
+    const dir = folder || defaultDir;
+    // 見出しの中に置くので、full path だと幅を食い潰す。末尾の2階層だけ
+    // 出し、全体は title で見せる。
+    const tail = dir ? dir.split(/[\\/]/).filter(Boolean).slice(-2).join('\\') : '';
+    pathEl.textContent = '保存先: ' + (tail || '読み込み中');
+    pathEl.title = dir ? dir + '（クリックで開く）' : '';
+    clearBtn.classList.toggle('hidden', !folder);
   }
   update(localStorage.getItem('synth_save_folder'));
+  window.api.getOutputsDir()
+    .then((d) => { defaultDir = d || ''; update(localStorage.getItem('synth_save_folder')); })
+    .catch(() => {});
+  pathEl.style.cursor = 'pointer';
+  pathEl.addEventListener('click', () => {
+    window.api.openSaveFolder(localStorage.getItem('synth_save_folder')).catch(() => {});
+  });
   btn.addEventListener('click', async () => {
     const folder = await window.api.selectSaveFolder();
     if (folder) { localStorage.setItem('synth_save_folder', folder); update(folder); }
@@ -734,7 +831,9 @@ function renderEmojis(toolbar = emojiToolbar, resolveTarget = null, open = true)
         ta.selectionStart = ta.selectionEnd = start + item.e.length;
         // 行の作り直しは生成タブの都合。差し替え先には関係ない。
         if (!resolveTarget) {
-          if (ta === textInput) updateCharCount();
+          // value を直に入れ替えているので input は飛ばない。1行目の
+          // 字数と予測秒は自分で呼び直す（2行目以降は refreshLines が見る）。
+          if (ta === textInput) { updateCharCount(); updateDurationEstimate(); }
           refreshLines();
         }
       });
@@ -817,6 +916,25 @@ function applyPrecisionOptions(status) {
   }
 }
 
+// モデルごとの CFG 既定値（/status の cfg_defaults）。届くまでは null。
+let cfgDefaults = null;
+
+// 生成タブと朗読タブの CFG スライダーを、そのモデルの既定値にする。
+// 表示の数字は各スライダーの input で更新されるので、値を入れたら input を流す。
+function applyCfgDefaults(model) {
+  const d = cfgDefaults && cfgDefaults[model];
+  if (!d) return;
+  const set = (el, v) => {
+    if (!el || v == null) return;
+    el.value = v;
+    el.dispatchEvent(new Event('input'));
+  };
+  set(paramCfgText, d.text);
+  set(paramCfgSpeaker, d.speaker);
+  set(document.getElementById('narrate-cfg-text'), d.text);
+  set(document.getElementById('narrate-cfg-spk'), d.speaker);
+}
+
 async function checkApiStatus() {
   try {
     const res = await fetch(`${API_URL}/status`);
@@ -830,6 +948,12 @@ async function checkApiStatus() {
         const st = await res.clone().json();
         applyDeviceOptions(st);
         applyPrecisionOptions(st);
+        // CFG の初期値はサーバの既定（server.py の _CFG_DEFAULTS）に合わせる。
+        // 最初に受け取ったときだけ当て、以後はモデルを替えたときに当て直す。
+        if (st.cfg_defaults && !cfgDefaults) {
+          cfgDefaults = st.cfg_defaults;
+          applyCfgDefaults(modelSelect.value);
+        }
         // AMD は Windows での学習を公式に対応していない。該当する環境の
         // ときだけ学習タブに断りを出す（それ以外では出さない）。
         const rocmNote = document.getElementById('tr-rocm-notice');
@@ -1023,6 +1147,7 @@ function setupEventListeners() {
 
   modelSelect.addEventListener('change', (e) => {
     syncCaptionField(e.target.value);
+    applyCfgDefaults(e.target.value);
     // VoiceDesign は参照音声を取らないので、選ばれていたら外す。
     if (isVoiceDesignModel(e.target.value)) clearVoice();
     refreshLoraDropdown();
@@ -1069,11 +1194,11 @@ function setupEventListeners() {
 
   paramCandidates.addEventListener('input', e => valCandidates.textContent = e.target.value);
   paramSteps.addEventListener('input', e => valSteps.textContent = e.target.value);
-  paramCfgText.addEventListener('input', e => valCfgText.textContent = e.target.value);
+  paramCfgText.addEventListener('input', e => valCfgText.textContent = parseFloat(e.target.value).toFixed(1));
   paramDurationScale.addEventListener('input', updateDurationEstimate);
   textInput.addEventListener('input', updateDurationEstimate);
   updateDurationEstimate();
-  paramCfgSpeaker.addEventListener('input', e => valCfgSpeaker.textContent = e.target.value);
+  paramCfgSpeaker.addEventListener('input', e => valCfgSpeaker.textContent = parseFloat(e.target.value).toFixed(1));
   paramCfgCaption.addEventListener('input', e => valCfgCaption.textContent = e.target.value);
   paramSwayCoeff.addEventListener('input', e => valSwayCoeff.textContent = parseFloat(e.target.value).toFixed(1));
   paramTScheduleMode.addEventListener('change', e => {
@@ -1295,7 +1420,32 @@ function fillTake(take, src, seed) {
 
   // 波形。データセット側と同じ描き方を使う。
   const canvas = take.querySelector('.wave');
-  if (canvas) { canvas.dataset.src = src; drawClipWave(canvas); }
+  if (canvas) {
+    canvas.dataset.src = src;
+    drawClipWave(canvas);
+    // 再生位置。鳴った側を明るくして、どこを聴いているか分かるようにする。
+    // timeupdate は 4 回/秒ほどしか来ず、8 秒の音では飛んで見える。
+    // 鳴っているあいだだけ描き直す。
+    let raf = 0;
+    const paint = () => {
+      if (!canvas._peaks) return;
+      const d = audio.duration;
+      paintWave(canvas, canvas._peaks, isFinite(d) && d ? audio.currentTime / d : 0);
+    };
+    const tick = () => {
+      paint();
+      if (!audio.paused) raf = requestAnimationFrame(tick);
+    };
+    audio.addEventListener('play', () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(tick);
+    });
+    audio.addEventListener('pause', () => { cancelAnimationFrame(raf); paint(); });
+    audio.addEventListener('ended', () => {
+      cancelAnimationFrame(raf);
+      paintWave(canvas, canvas._peaks || [], null);   // 鳴り終わったら元に戻す
+    });
+  }
 
   // 保存と削除
   const acts = take.querySelector('.acts');
@@ -1637,6 +1787,7 @@ const LORA_BASES = {
   v4_1:            { cls: 'v4', label: 'v4.1', tip: 'v4.1-Small' },
   v4_1_anime:      { cls: 'v4', label: 'アニメ', tip: 'v4.1-Anime (phasefield-audio)' },
   v4:              { cls: 'v4', label: 'v4',   tip: 'v4-Small' },
+  v4_large:        { cls: 'v4', label: 'Large', tip: 'v4-Large' },
   v3:              { cls: 'v3', label: 'v3',   tip: 'v3' },
   v3_voice_design: { cls: 'vd', label: 'VD3',  tip: 'v3 Voice Design (600M)' },
   v2:              { cls: 'v2', label: 'v2',   tip: 'v2' },
@@ -2038,7 +2189,29 @@ function _waveObserver() {
   return _waveObserver._o;
 }
 
-async function drawClipWave(canvas) {
+// 描くだけの部分。再生中は毎フレーム呼ぶので、デコードから切り離す。
+// ratio に 0〜1 を渡すと、そこまでを明るく、残りを薄く描く。
+// 省略すると全部を明るく描く（鳴らしていないときの見た目）。
+function paintWave(canvas, peaks, ratio) {
+  const dpr = window.devicePixelRatio || 1;
+  const w = canvas.clientWidth || 100, h = canvas.clientHeight || 16;
+  canvas.width = w * dpr; canvas.height = h * dpr;
+  const g = canvas.getContext('2d');
+  g.scale(dpr, dpr);
+  g.clearRect(0, 0, w, h);
+  g.fillStyle = getComputedStyle(canvas).color || '#c9a86a';
+  const bw = w / peaks.length;
+  const upto = ratio == null ? peaks.length
+    : Math.round(peaks.length * Math.min(1, Math.max(0, ratio)));
+  for (let i = 0; i < peaks.length; i++) {
+    const bh = Math.max(1, peaks[i] * h);
+    g.globalAlpha = i < upto ? 1 : 0.3;
+    g.fillRect(i * bw, (h - bh) / 2, Math.max(1, bw - 0.5), bh);
+  }
+  g.globalAlpha = 1;
+}
+
+async function drawClipWave(canvas, ratio) {
   const src = canvas.dataset.src;
   if (!src) return;
   try {
@@ -2062,18 +2235,8 @@ async function drawClipWave(canvas) {
       }
       dsWaveCache.set(src, peaks);
     }
-    const dpr = window.devicePixelRatio || 1;
-    const w = canvas.clientWidth || 100, h = canvas.clientHeight || 16;
-    canvas.width = w * dpr; canvas.height = h * dpr;
-    const g = canvas.getContext('2d');
-    g.scale(dpr, dpr);
-    g.clearRect(0, 0, w, h);
-    g.fillStyle = getComputedStyle(canvas).color || '#c9a86a';
-    const bw = w / peaks.length;
-    for (let i = 0; i < peaks.length; i++) {
-      const bh = Math.max(1, peaks[i] * h);
-      g.fillRect(i * bw, (h - bh) / 2, Math.max(1, bw - 0.5), bh);
-    }
+    canvas._peaks = peaks;          // 再生中に描き直すため手元に置く
+    paintWave(canvas, peaks, ratio);
   } catch {
     // 読めない音源は波形なしで通す。行そのものは使える。
   }
@@ -2239,8 +2402,8 @@ function setupDatasetTab() {
       if (!f.path) continue;
       // In Electron, dropped folders show as File with empty `type` and `size`==0.
       // The robust check is to ask main process via IPC; here we use a heuristic:
-      // names without a .wav suffix are treated as candidate folders.
-      if (/\.(wav|ogg)$/i.test(f.name)) {
+      // names without an audio suffix are treated as candidate folders.
+      if (/\.(wav|mp3|flac|ogg)$/i.test(f.name)) {
         filePaths.push(f.path);
       } else {
         folderPaths.push(f.path);
@@ -3429,10 +3592,10 @@ async function synthesize(index, session) {
     if (session.device) fd.append('device', session.device);
     fd.append('seed', session.seed);   // セッション固定seedで話者を一貫させる
     if (session.loraName) fd.append('lora_name', session.loraName);
-    // The voice comes from the sample when there is one; a full adapter
-    // carries its own and needs nothing. Self-reference is the fallback for
-    // a style-only adapter with no sample: generate once, then reuse that
-    // take so the speaker stops drifting between chunks.
+    // The voice comes from the sample when there is one. Otherwise the
+    // self-reference (one take generated at the start) is passed as the
+    // reference for every chunk, so reference + LoRA bind the speaker and it
+    // cannot drift between chunks -- whether or not the adapter has a voice.
     if (session.voicePath) {
       const r = await fetch('file://' + session.voicePath.replace(/\\/g, '/'));
       fd.append('ref_wav', await r.blob(), 'ref.wav');
@@ -3544,8 +3707,10 @@ async function play() {
     });
     nBuffer = {};   // 旧設定で作った音声を破棄
     // 自己参照ブートストラップ: LoRAで種セリフを1回合成し、その声を参照に固定。
-    // サンプルがあればそれが話者を決めるので不要。完パケLoRAも自前で持つ。
-    if (s.loraName && s.selfrefOn && !s.voicePath && !s.loraHasVoice) {
+    // 参照＋LoRA で話者を縛り、区切りごとに声が変わらないようにするのが目的。
+    // 声まで持つLoRAでも区切りごとに話者は揺れうるので、LoRAの種類では判定しない。
+    // サンプルボイスを選んでいれば、それが参照になるので作らない。
+    if (s.loraName && s.selfrefOn && !s.voicePath) {
       setStatus('自己参照を生成中…');
       try {
         nSession.refBlob = await buildSelfRef(nSession);
@@ -3590,11 +3755,16 @@ function pause() {
   if (gapTimer) { clearTimeout(gapTimer); gapTimer = null; }
   setStatus('一時停止');
 }
+// 停止すると読む位置は頭に戻る。止めてからしおりを挟むと頭（0）が保存され、
+// 再開ボタンが出なくなっていた（実測）。止める直前の位置を覚えておき、
+// しおりはそちらを使う。
+let nLastPlayed = 0;
 function stop() {
   nPlaying = false; nSession = null; nBuffer = {};
   if (nAudio) { nAudio.pause(); nAudio = null; }
   playBtn.classList.remove('playing'); setPlayIcon(false);
   if (gapTimer) { clearTimeout(gapTimer); gapTimer = null; }
+  if (nIndex > 0) nLastPlayed = nIndex;
   nIndex = 0; refreshChunkClasses(); setStatus('停止中');
 }
 function jumpTo(i) {
@@ -3627,6 +3797,7 @@ function loadNarrateContent(filePath, content) {
   nChunks = splitText(nRawText);
   renderText();
   setStatus(nChunks.length + ' 行 — 再生で開始');
+  nLastPlayed = 0;     // 前の本で止めた位置を持ち越さない
   showResumeIfAny();   // しおりがあれば再開ボタン表示
 }
 
@@ -3753,8 +3924,9 @@ function showResumeIfAny() {
 
 bookmarkBtn.addEventListener('click', () => {
   if (!nFilePath || !nChunks.length) { setStatus('ファイル未選択'); return; }
-  saveBookmark(nIndex);
-  setStatus(`しおりを挟みました（${nIndex + 1} / ${nChunks.length}）`);
+  const at = nIndex > 0 ? nIndex : nLastPlayed;
+  saveBookmark(at);
+  setStatus(`しおりを挟みました（${at + 1} / ${nChunks.length}）`);
   showResumeIfAny();
 });
 
@@ -3856,12 +4028,26 @@ bookmarkBtn.addEventListener('click', () => {
       `<div class="pick">` +
         `<div class="pick-t">${esc(it.title)}</div>` +
         `<div class="pick-a">${esc(it.author)}</div>` +
+        `<div id="aoz-head" class="pick-head">冒頭を読み込んでいます…</div>` +
         `<div class="pick-act">` +
           `<button id="aoz-dl-btn" class="btn btn-primary"><svg class="i i-sm"><use href="#ic-dl"/></svg>テキストを保存</button>` +
         `</div>` +
         `<div id="aoz-saved" class="saved hidden"></div>` +
       `</div>`;
     $('aoz-dl-btn').addEventListener('click', () => doDownload(it));
+    // 冒頭を出して、別の作品を取ってこないか確かめられるようにする。
+    // 選び直したあとに前の作品の冒頭が遅れて届いたら捨てる
+    detailEl.dataset.url = it.txtUrl;
+    const current = () => detailEl.dataset.url === it.txtUrl;
+    window.api.aozoraPreview({ txtUrl: it.txtUrl, encoding: it.encoding })
+      .then((r) => {
+        const el = $('aoz-head');
+        if (el && current()) el.textContent = r.head + '…';
+      })
+      .catch((e) => {
+        const el = $('aoz-head');
+        if (el && current()) el.textContent = '冒頭を読み込めませんでした: ' + e.message;
+      });
   }
 
   async function doDownload(it) {
@@ -4489,8 +4675,10 @@ async function easyDrawVoice() {
   try {
     // seed が空なら渡さない。押すたびに別の声になる。入っていればその声を
     // 出し直す（同じ文・同じ seed なら同じ声）。
+    // 生成タブ・朗読と同じく読み辞書を通す。通さないと「一緋」を「イッピ」と
+    // 読んだ（実測）。画面の字はそのまま、送る音だけ置き換える。
     const body = {
-      text: sample,
+      text: applyDict(sample),
       model_type: easyEl('easy-vd-model').value,
       caption,
       no_ref: true,

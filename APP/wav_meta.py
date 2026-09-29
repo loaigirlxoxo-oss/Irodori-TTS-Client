@@ -27,6 +27,27 @@ _SOFTWARE = "Irodori-TTS Client"
 _FULL = b"IRDR"
 
 
+# エクスプローラー用の ID3 チャンク。RIFF の規約どおり4バイト（末尾は空白）。
+_ID3 = b"id3 "
+
+
+def _syncsafe(n: int) -> bytes:
+    """ID3v2 のサイズ表記。各バイトの最上位ビットを使わない。"""
+    return bytes(((n >> 21) & 0x7F, (n >> 14) & 0x7F, (n >> 7) & 0x7F, n & 0x7F))
+
+
+def _id3_comment(text: str) -> bytes:
+    """COMM フレームだけを持つ ID3v2.3 タグ。
+
+    エクスプローラーは wav の LIST/INFO を読まない（実測：詳細タブにも
+    コメント列にも出なかった）。読むのは id3 チャンクのほう。
+    中身は _summary と同じ半角の一行なので ISO-8859-1 で足りる。
+    """
+    body = b"\x00eng\x00" + text.encode("latin-1", "replace") + b"\x00"
+    frame = b"COMM" + struct.pack(">I", len(body)) + b"\x00\x00" + body
+    return b"ID3\x03\x00\x00" + _syncsafe(len(frame)) + frame
+
+
 def _chunk(cid: bytes, payload: bytes) -> bytes:
     if len(payload) % 2:
         payload += b"\x00"          # RIFF は偶数長
@@ -72,7 +93,11 @@ def tag_wav(path: str | Path, info: dict) -> None:
         inner = b"INFO" + _chunk(b"ISFT", _SOFTWARE.encode("ascii") + b"\x00") \
                         + _chunk(b"ICMT", _summary(info).encode("ascii") + b"\x00")
         full = json.dumps(info, ensure_ascii=False, separators=(",", ":"))
+        summary = _summary(info)
         out = raw + _chunk(b"LIST", inner) + _chunk(_FULL, full.encode("utf-8"))
+        if summary:
+            # エクスプローラーの「コメント」に出るのはこちら
+            out += _chunk(_ID3, _id3_comment(summary))
         # 先頭の RIFF サイズを直す（ファイル全体 - 8）
         out = out[:4] + struct.pack("<I", len(out) - 8) + out[8:]
         p.write_bytes(out)

@@ -1,4 +1,6 @@
-dacvae @ git+https://github.com/facebookresearch/dacvae
+# git+ ではなく GitHub の tarball から入れる。git を入れずに済ませるため。
+# 参照は commit で固定する（既定ブランチが動いても結果が変わらない）。
+dacvae @ https://github.com/facebookresearch/dacvae/archive/414c20785fc3a28373073ea8ef7a1316eeeaca6e.tar.gz
 datasets>=3.0.0
 gradio>=5.0.0
 huggingface-hub>=0.34.0
@@ -17,7 +19,7 @@ soundfile>=0.12.0
 # Radeon 版 PyTorch は Windows では cp312 のみの配布なので、上限を外して
 # 3.12 を選べるようにする。
 sentencepiece>=0.1.99
-silentcipher @ git+https://github.com/SesameAILabs/silentcipher.git@d46d7d0893a583d8968ab3a6626e2289faec9152
+silentcipher @ https://github.com/SesameAILabs/silentcipher/archive/d46d7d0893a583d8968ab3a6626e2289faec9152.tar.gz
 torch>=2.10.0
 torchaudio>=2.10.0
 torchcodec>=0.10.0,<0.11.0

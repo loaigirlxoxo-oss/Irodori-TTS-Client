@@ -6,14 +6,121 @@
   "scripts": {
     "start": "set ELECTRON_RUN_AS_NODE=&& electron .",
     "pack": "electron-builder --dir",
-    "dist": "electron-builder"
+    "dist": "node build/fetch-python.js && electron-builder",
+    "prepack": "node build/fetch-python.js"
   },
-  "keywords": ["irodori", "tts", "electron"],
+  "keywords": [
+    "irodori",
+    "tts",
+    "electron"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {},
   "devDependencies": {
     "electron": "^29.2.0",
     "electron-builder": "^24.13.3"
+  },
+  "build": {
+    "appId": "com.loaivoice.irodori-tts-client",
+    "productName": "Irodori-TTS Client",
+    "artifactName": "Irodori-TTS-Client-Setup-${version}.${ext}",
+    "directories": {
+      "output": "../dist",
+      "buildResources": "build"
+    },
+    "asar": true,
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer.js",
+      "runtime.js",
+      "index.html",
+      "setup.html",
+      "style.css",
+      "theme.css",
+      "assets/**/*",
+      "package.json",
+      "!build/**/*",
+      "build/icon.ico",
+      "!node_modules/.cache/**/*"
+    ],
+    "extraFiles": [
+      {
+        "from": "../THIRD-PARTY-NOTICES.md",
+        "to": "THIRD-PARTY-NOTICES.md"
+      },
+      {
+        "from": "assets/OFL.txt",
+        "to": "OFL.txt"
+      }
+    ],
+    "extraResources": [
+      {
+        "from": "build/python-embed",
+        "to": "python-embed"
+      },
+      {
+        "from": ".",
+        "to": "backend/APP",
+        "filter": [
+          "*.py",
+          "requirements.txt",
+          "presets/**/*"
+        ]
+      },
+      {
+        "from": "../irodori_tts",
+        "to": "backend/irodori_tts",
+        "filter": [
+          "**/*.py",
+          "**/*.json",
+          "**/*.yaml"
+        ]
+      },
+      {
+        "from": "../configs",
+        "to": "backend/configs"
+      },
+      {
+        "from": "../requirements.txt",
+        "to": "backend/requirements.txt"
+      },
+      {
+        "from": "../train.py",
+        "to": "backend/train.py"
+      },
+      {
+        "from": "../infer.py",
+        "to": "backend/infer.py"
+      },
+      {
+        "from": "../docs",
+        "to": "backend/docs"
+      },
+      {
+        "from": "../LICENSE",
+        "to": "backend/LICENSE"
+      }
+    ],
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Irodori-TTS Client",
+      "deleteAppDataOnUninstall": false
+    }
   }
 }

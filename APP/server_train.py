@@ -64,6 +64,12 @@ BASE_CONFIGS: dict[str, dict[str, str]] = {
         "repo_id": "Aratako/Irodori-TTS-v4-Small",
         "config_file": "configs/train_v4_small_lora.yaml",
     },
+    # v4-Large（ベータ）。上流に LoRA 用 config が無いので Client で作った。
+    # model: は公開チェックポイントの config_json の写し、train: は Small と同じ＋勾配チェックポイント。
+    "v4_large": {
+        "repo_id": "Aratako/Irodori-TTS-v4-Large",
+        "config_file": "configs/train_v4_large_lora.yaml",
+    },
     "v3": {
         "repo_id": "Aratako/Irodori-TTS-500M-v3",
         "config_file": "configs/train_500m_v3_lora.yaml",

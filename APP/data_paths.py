@@ -38,6 +38,23 @@ def data_root() -> Path:
     return base
 
 
+def models_root() -> Path:
+    """モデルの置き場。
+
+    パッケージ版は <install>\\data\\models。main.js と runtime.js が
+    IRODORI_MODELS_DIR で渡す（HF_HOME と同じ場所）。指定が無ければ
+    これまでどおりリポジトリ直下の models/。
+
+    HF のキャッシュ構造（hub/…/snapshots/<hash>/）に乗せられないもの
+    ――ECAPA や手で置く重み――を、この下に実体で置く。アプリ本体の
+    隣ではなくここに置くのは、更新でアプリ側が丸ごと入れ替わるため。
+    """
+    raw = os.environ.get("IRODORI_MODELS_DIR", "").strip()
+    if raw:
+        return Path(raw)
+    return Path(__file__).resolve().parent.parent / "models"
+
+
 # setup.bat が取得しないモデル。上流ではないものを必須依存にすると、配布元が
 # 消えた時点で全員のセットアップが失敗する。使いたい人だけが手で置く。
 OPTIONAL_MODELS = frozenset({"phasefield-audio/Irodori-TTS-v4.1-Anime"})
@@ -50,10 +67,10 @@ def manual_models_dir() -> Path:
     組み立てさせるのは無理がある。リポジトリ名そのままのフォルダに
     model.safetensors を置くだけで使えるようにする。
 
-    ユーザーデータ（IRODORI_DATA_DIR で動かせる）ではなくアプリの資材なので、
-    data_root() ではなくリポジトリ直下に固定する。
+    アプリの資材なので data_root() ではなく models_root() の下に置く。
+    アプリ本体の隣だと、更新のたびに消えて置き直しになる。
     """
-    return Path(__file__).resolve().parent.parent / "models" / "manual"
+    return models_root() / "manual"
 
 
 def manual_checkpoint(repo_id: str) -> str | None:

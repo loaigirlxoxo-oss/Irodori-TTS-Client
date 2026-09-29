@@ -207,7 +207,7 @@ def _describe_runtime(
         notes.append(
             "info: this checkpoint supports speaker conditioning; provide reference audio or keep no-reference enabled."
         )
-    return "\n".join(
+    status_text = "\n".join(
         [
             status,
             f"checkpoint: {runtime_key.checkpoint}",
@@ -220,6 +220,7 @@ def _describe_runtime(
             *notes,
         ]
     )
+    return status_text
 
 
 def _run_generation(
@@ -231,7 +232,7 @@ def _run_generation(
     text: str,
     caption: str,
     ref_wavs: object,
-    num_steps: int,
+    num_steps: str | None,
     num_candidates: int,
     seed_raw: str,
     seconds_raw: str,
@@ -276,6 +277,10 @@ def _run_generation(
         raise ValueError("num_candidates must be >= 1.")
     if requested_candidates > MAX_GRADIO_CANDIDATES:
         raise ValueError(f"num_candidates must be <= {MAX_GRADIO_CANDIDATES}.")
+
+    parsed_num_steps = _parse_optional_int(num_steps, "num_steps")
+    if parsed_num_steps is not None and parsed_num_steps < 1:
+        raise ValueError("num_steps must be >= 1 or blank.")
 
     cfg_scale = _parse_optional_float(cfg_scale_raw, "cfg_scale")
     max_text_len = _parse_optional_int(max_text_len_raw, "max_text_len")
@@ -346,7 +351,7 @@ def _run_generation(
             max_ref_seconds=None,
             max_text_len=max_text_len,
             max_caption_len=max_caption_len,
-            num_steps=int(num_steps),
+            num_steps=parsed_num_steps,
             seed=None if seed is None else int(seed),
             cfg_guidance_mode=str(cfg_guidance_mode),
             cfg_scale_text=float(cfg_scale_text),
@@ -419,7 +424,7 @@ def build_ui() -> gr.Blocks:
     with gr.Blocks(title="Irodori-TTS VoiceDesign Gradio") as demo:
         gr.Markdown("# Irodori-TTS VoiceDesign Inference")
         gr.Markdown(
-            "Irodori-TTS-v4-Small向けの統合UIです。captionを入れると声質・スタイルを指定でき、"
+            "Irodori-TTS-v4.1-Small向けの統合UIです。captionを入れると声質・スタイルを指定でき、"
             "参照音声と組み合わせることもできます。"
         )
 
@@ -489,7 +494,12 @@ def build_ui() -> gr.Blocks:
 
         with gr.Accordion("Sampling", open=True):
             with gr.Row():
-                num_steps = gr.Slider(label="Num Steps", minimum=1, maximum=120, value=40, step=1)
+                num_steps = gr.Textbox(
+                    label="Num Steps",
+                    value="",
+                    placeholder="Auto (RF: 40, MeanFlow: 4)",
+                    info="Blank: model default (RF: 40, MeanFlow: 4).",
+                )
                 num_candidates = gr.Slider(
                     label="Num Candidates",
                     minimum=1,

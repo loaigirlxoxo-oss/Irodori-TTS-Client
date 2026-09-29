@@ -347,6 +347,10 @@ body.no-aside .corner-side-r { display:none; }
 .editor-field textarea { padding-bottom:28px; }
 .editor-field .meta {
   position:absolute; right:24px; bottom:8px; pointer-events:none;
+  /* left が auto だと幅は「静的位置から右端まで」。直前の textarea が
+     inline-block なので静的位置が右端近くになり、幅がほとんど残らない。
+     日本語はどこでも折り返せるため「秒」だけ次の行へ落ちていた。 */
+  white-space:nowrap;
 }
 
 /* 生成前に見る唯一の実測値。--faint だと地に沈んで読めないので、
@@ -1242,6 +1246,8 @@ textarea, .glass-textarea { height:auto; padding:8px 10px; font-size:14px; line-
 /* 選んだもの */
 .pick { padding:14px; }
 .pick-a { margin-top:5px; font-size:11.5px; color:var(--faint); }
+/* 保存する前に確かめる冒頭。長いと保存ボタンが下へ逃げるので4行で切る */
+.pick-head { margin-top:10px; font-size:13px; line-height:1.8; color:var(--text); display:-webkit-box; -webkit-line-clamp:4; -webkit-box-orient:vertical; overflow:hidden; }
 .pick-t { font-family:"Yonaga",serif; font-size:17px; color:var(--text); letter-spacing:.04em; }
 .pick-m { margin-top:5px; font-size:11.5px; color:var(--faint); }
 .pick-s {

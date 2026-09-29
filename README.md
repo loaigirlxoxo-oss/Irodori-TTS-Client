@@ -1,4 +1,4 @@
-# Irodori-TTS Desktop
+# Irodori-TTS Client
 
 [Irodori-TTS](https://github.com/Aratako/Irodori-TTS)（Aratako 氏）に、音声合成・データセット作成・LoRA 学習・朗読を
 ひとつのウィンドウで扱える Electron アプリを載せたものです。
@@ -10,10 +10,25 @@
 
 ## 導入
 
-**入手する**
+### インストーラで入れる（おすすめ）
+
+[Releases](https://github.com/loaigirlxoxo-oss/Irodori-TTS-Client/releases) から
+`Irodori-TTS-Client-Setup-<版>.exe` をダウンロードして実行します。
+Python は同梱しているので、Python・Node.js・Git を別に入れる必要はありません。
+
+1. インストーラを実行し、入れる場所を選んで「インストール」
+2. デスクトップのアイコンから起動
+3. 初回だけ準備の画面が出て、動かすための部品と音声モデル（約30GB）を取得します
+
+| 項目 | 条件 |
+|-|-|
+| OS | Windows 10 / 11 |
+| GPU | NVIDIA 製を推奨（AMD は試験対応、GPU 無しでも CPU で動作） |
+| 空き容量 | **45GB 以上**（環境 5.7GB ＋ モデル 30GB ＋ 作業領域） |
+
+### ソースから入れる
 
 緑の **Code** ボタンから **Download ZIP** を選び、好きな場所に展開します。
-[Releases](https://github.com/loaigirlxoxo-oss/Irodori-TTS-Client/releases) からも同じものを取得できます。
 
 Git を使う場合は次のようにします。
 
@@ -33,7 +48,7 @@ git clone https://github.com/loaigirlxoxo-oss/Irodori-TTS-Client.git
 | Node.js | LTS 版（[nodejs.org](https://nodejs.org/en/download)） |
 | Git | [Git for Windows](https://git-scm.com/install/windows) |
 | GPU | NVIDIA 製・VRAM 8GB 以上を推奨（AMD は試験対応、GPU 無しでも CPU で動作） |
-| 空き容量 | **30GB 以上**（環境 5.7GB ＋ モデル 17GB ＋ 作業領域） |
+| 空き容量 | **45GB 以上**（環境 5.7GB ＋ モデル 30GB ＋ 作業領域） |
 
 かんたん学習タブだけは **VRAM 12GB 以上**を見てください。長い文（200文字程度）を
 鳴らす時点で合成に 8.5GB ほど要り、学習と採用の評価まで通すとピークが約 11GB でした
@@ -51,7 +66,7 @@ Radeon は試験対応です。生成は動く見込みですが、AMD は Windo
 **手順**
 
 ```
-1. setup.bat をダブルクリック   … 30〜60分（環境構築＋モデル約17GB取得）
+1. setup.bat をダブルクリック   … 30〜60分（環境構築＋モデル約30GB取得）
 2. 起動.bat をダブルクリック
 ```
 
@@ -63,7 +78,7 @@ Radeon は試験対応です。生成は動く見込みですが、AMD は Windo
 
 | タブ | 役割 |
 |-|-|
-| Synthesize | テキスト→音声合成（v4.1 / v4 / v3 / v2 と VoiceDesign 2種の計6モデル、任意で Anime を追加可） |
+| Synthesize | テキスト→音声合成（v4-Large / v4.1 / v4 / v3 / v2 と VoiceDesign 2種の計7モデル、任意で Anime を追加可） |
 | かんたん学習 | 声を決めるだけで、素材の生成→選別→学習→登録までを通す（VRAM 12GB 以上を推奨） |
 | Dataset | 音声の自動分割→書き起こし→データセット化 |
 | Train | データセットから LoRA を学習 |
@@ -119,13 +134,16 @@ v4.1-Small と構造が同じ（safetensors のキー 714 件と全ての形状�
 
 **確認済み**
 
-- `setup.bat` の完走（Node / Python 環境 / 音声モデル6種＋コーデック・トークナイザ・書き起こし・電子透かし・話者照合、約17GB）
+- `setup.bat` の完走（Node / Python 環境 / 音声モデル7種＋コーデック・トークナイザ・書き起こし・電子透かし・話者照合、約30GB）
 - CUDA 有効（torch 2.10.0+cu128 / torchcodec 0.10.0）
 - アプリ起動と8タブの表示
-- 6モデルすべての生成（v4.1 / v4 / v3 / v2 / v3 VoiceDesign / v2 VoiceDesign）
+- 7モデルすべての生成（v4-Large / v4.1 / v4 / v3 / v2 / v3 VoiceDesign / v2 VoiceDesign）
 - 参照音声あり・なしの両方
 - 計算装置（GPU / CPU）と計算精度（fp32 / bf16）の切り替え
 - LoRA 学習と登録（v4.1 / v4 / v3 / v2 と VoiceDesign 2種の計6ベース）
+- v4-Large の LoRA 学習（**ベータ**）。RTX 5080 (16GB) で10ステップの学習・登録・生成まで。
+  学習中の VRAM は約15.9GB で、16GB の GPU ではほぼ上限です
+- かんたん学習タブの通し（生成→選別→学習→登録）
 - Dataset タブの音声分割・書き起こし（silero-vad + anime-whisper）
 - データセットの latents 生成
 - 朗読 / 青空文庫 / LoRAマージ / 辞書
@@ -135,12 +153,12 @@ v4.1-Small と構造が同じ（safetensors のキー 714 件と全ての形状�
 
 **未確認**
 
-- かんたん学習タブ。Original 側で通しを確かめたものを移植した状態で、この
-  リポジトリの環境では動かしていません
+- v4-Large の LoRA 学習を最後まで回したときの品質。上流が v4-Large の LoRA 用設定を
+  出していないため、設定は v4-Small のものを元にこちらで作っています
 - AMD (Radeon) での動作。導入経路は用意しましたが実機で確かめていません
 - Linux / macOS。`setup.bat` と `起動.bat` は Windows 専用です
 
-確認した環境は Windows / RTX 5080 (16GB) と RTX 3080 の2構成です。それ以外では確認していません。
+確認した環境は Windows / RTX 5080 (16GB)・RTX 3080・GTX 1060（生成と朗読）の3構成です。それ以外では確認していません。
 
 ---
 
@@ -153,5 +171,39 @@ v4.1-Small と構造が同じ（safetensors のキー 714 件と全ての形状�
 | エンジン（学習・推論コード） | Copyright (c) 2026 Aratako — [上流リポジトリ](https://github.com/Aratako/Irodori-TTS) |
 | デスクトップアプリ層（`APP/`） | Copyright (c) 2026 Lo-Ai girl |
 
-モデルの利用条件は配布元の規約に従ってください。
-生成した音声の扱いは利用者の責任です。実在人物の声を本人の許可なく再現する用途には使わないでください。
+### 同梱しているもの
+
+インストーラには、このアプリのコード以外に次のものが入っています。許諾文も一緒に入れてあります。
+
+| 中身 | 許諾 | 許諾文の場所 |
+|-|-|-|
+| Python 3.12.10（embeddable） | PSF License Agreement | `resources\python-embed\LICENSE.txt` |
+| pip | MIT | 初回起動で `data\runtime` に展開されます |
+| Electron / Chromium ほか | MIT ／ BSD-3-Clause ほか | `LICENSE.electron.txt` `LICENSES.chromium.html` |
+| 夜永オールド明朝 Bold | SIL Open Font License 1.1 | `OFL.txt` |
+
+**Git と uv は同梱していません。** アプリの導入にも実行にも使いません。
+上流の手順では両方が必要ですが、こちらは Python を同梱し、依存の取得は同梱の pip が行います。
+
+### 取得するもの
+
+音声モデル約30GB、書き起こしモデル、電子透かし、話者照合モデルは、初回の準備で
+**利用者のパソコンが配布元から直接取得します**。このアプリが再配布しているものでは
+ありません。取得先と許諾の一覧は [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md)
+にまとめてあります（本文にも同じものが入ります）。
+
+v4-Large だけは許諾が MIT ではありません。文章の読み取り部分が google/t5gemma-2-1b-1b 由来のため、
+[Gemma 利用規約](https://ai.google.dev/gemma/terms) と
+[Gemma 使用禁止ポリシー](https://ai.google.dev/gemma/prohibited_use_policy) に従う必要があります。
+
+### 生成した音声について
+
+音声モデルの配布元は、許諾とは別に次のことを求めています。
+
+- 本人の明確な同意なく、特定の個人（声優・著名人・公人など）の声を複製したり
+  なりすましたりしないこと
+- 人を欺いたり誤情報を広めたりする目的の合成音声・ディープフェイクを作らないこと
+- 生成物の扱いは利用者の責任であり、適用される法令の遵守は利用者が負うこと
+
+文章だけから作った声が実在の人物にたまたま似ることがありますが、それは確率的な
+副産物であって意図した再現ではありません。
