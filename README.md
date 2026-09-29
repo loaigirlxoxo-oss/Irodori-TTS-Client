@@ -3,6 +3,8 @@
 [Irodori-TTS](https://github.com/Aratako/Irodori-TTS)（Aratako 氏）に、音声合成・データセット作成・LoRA 学習・朗読を
 ひとつのウィンドウで扱える Electron アプリを載せたものです。
 
+使い方の動画（YouTube）：https://youtu.be/eO6362tjJRE
+
 コードの大部分は上流のものです。上流の README は [README.upstream.md](README.upstream.md)（英語）と
 [README.upstream.ja.md](README.upstream.ja.md)（日本語の要約）に置いてあります。
 
