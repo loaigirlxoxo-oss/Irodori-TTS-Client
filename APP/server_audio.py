@@ -8,7 +8,6 @@ to avoid per-request startup cost.
 from __future__ import annotations
 
 import difflib
-import re
 import sys
 import threading
 import unicodedata
@@ -630,7 +629,6 @@ class TranscribeRequest(BaseModel):
     chunk_gap_sec: float = Field(0.6, ge=0.1, le=5.0, description="Pauses at least this long split the audio before transcription")
     floor_db: float = Field(45.0, ge=10.0, le=80.0, description="Sound quieter than peak minus this is not transcribed")
     vocabulary: str = Field("", max_length=2000, description="qwen3-asr only: names and words to prefer")
-    tag_nonverbal: bool = Field(False, description="Put the app's emoji tags before sighs, laughs and humming")
 
 
 def _load_audio_for_pipeline(wav_path: Path) -> tuple:
@@ -752,22 +750,6 @@ def _join_chunk_texts(texts: list[str]) -> str:
             out += "、"
         out += t
     return out
-
-
-# Emoji tags from the app's palette (irodori_tts/gradio_emoji_palette.py).
-TAG_SIGH, TAG_LAUGH, TAG_HUM = "😮‍💨", "🤭", "🎵"
-_TAG_BOUNDARY = r"(?:(?<=^)|(?<=[、。…!?！？」]))"
-_SIGH_RE = re.compile(_TAG_BOUNDARY + r"(?<!" + TAG_SIGH + r")((?:は[ぁあ]|ふ[ぅう]|ふー|はー)[ぁぅあうー]*)(?=[…、。!?！？ー]|$)")
-_LAUGH_RE = re.compile(_TAG_BOUNDARY + r"(?<!" + TAG_LAUGH + r")((?:う?ふふ+|えへ+|あはは+|くすっ|てへ)っ?)")
-# Humming only when it is sung (ふーん...); a bare ふんふん can be a nod.
-_HUM_RE = re.compile(r"^(?!" + TAG_HUM + r")(ふんふん(?=.*ふーん))")
-
-
-def _tag_nonverbal(text: str) -> str:
-    """Put the sigh / laugh / humming tags in front of those sounds."""
-    text = _SIGH_RE.sub(TAG_SIGH + r"\1", text)
-    text = _LAUGH_RE.sub(TAG_LAUGH + r"\1", text)
-    return _HUM_RE.sub(TAG_HUM + r"\1", text)
 
 
 ASR_MODELS = ("anime-whisper", "qwen3-asr")
@@ -941,8 +923,6 @@ def _transcribe_inner(req: "TranscribeRequest", src) -> JSONResponse:
             segments.append(_segment(start, end, run(audio_16k[a:b])))
 
     text = _join_chunk_texts([s["text"] for s in segments])
-    if req.tag_nonverbal:
-        text = _tag_nonverbal(text)
     return JSONResponse(content={
         "text": text,
         "segments": segments,

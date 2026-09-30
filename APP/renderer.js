@@ -1977,7 +1977,6 @@ const DS_OPTION_FIELDS = {
   chunkGap: ['ds-chunk-gap', 'num'],
   asrFloor: ['ds-asr-floor', 'num'],
   npr: ['ds-npr', 'num'],
-  tagNonverbal: ['ds-tag-nonverbal', 'bool'],
   trim: ['ds-trim', 'bool'],
   trimKeep: ['ds-trim-keep', 'num'],
   trimFloor: ['ds-trim-floor', 'num'],
@@ -1988,13 +1987,13 @@ const DS_OPTION_FIELDS = {
 };
 const DS_DEFAULTS = {
   splitMethod: 'vad', minSec: 3, maxSec: 20, asrModel: 'anime-whisper', vocab: '',
-  chunkGap: 0.6, asrFloor: 45, npr: 0, tagNonverbal: false,
+  chunkGap: 0.6, asrFloor: 45, npr: 0,
   trim: false, trimKeep: 100, trimFloor: 45, innerCap: 0,
   minSilence: 500, speechPad: 400, levelFloor: 45,
 };
 // 学習用のデータとしてのおすすめ。頭と尻の無音は学習の長さの見積もりを
 // 伸ばすだけなので切る（0.1 秒は残す）。中の間は演技なので縮めない。
-const DS_RECOMMENDED = { ...DS_DEFAULTS, trim: true, tagNonverbal: true };
+const DS_RECOMMENDED = { ...DS_DEFAULTS, trim: true };
 const DS_OPTIONS_KEY = 'ds-options-v1';
 // これより長い音源を「分割しない」で流す前に確かめる（学習の1本は長くても20秒前後）
 const DS_LONG_SOURCE_SEC = 60;
@@ -2368,7 +2367,6 @@ async function processSources() {
               chunk_gap_sec: o.chunkGap,
               floor_db: o.asrFloor,
               vocabulary: model === 'qwen3-asr' ? o.vocab : '',
-              tag_nonverbal: o.tagNonverbal,
             })
           });
           if (!trRes.ok) {

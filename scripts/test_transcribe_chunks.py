@@ -20,7 +20,6 @@ from server_audio import (  # noqa: E402
     _join_chunk_texts,
     _RewindEscape,
     _sound_chunks,
-    _tag_nonverbal,
     _transcribe_whole_then_tail,
     _trim_silence,
 )
@@ -112,16 +111,6 @@ def test_trim_leaves_silent_clip_alone() -> None:
     assert len(_trim_silence(audio, SR, 45.0, 0.1, 0.0)) == len(audio)
 
 
-def test_tags_sighs_laughs_humming() -> None:
-    assert _tag_nonverbal("ふぅ…") == "😮‍💨ふぅ…"
-    assert _tag_nonverbal("はい、ふふっ") == "はい、🤭ふふっ"
-    assert _tag_nonverbal("ふんふんふんふーん") == "🎵ふんふんふんふーん"
-    # 相槌の「ふんふん」、語の途中の「ふう」には付けない。二度かけても増えない
-    assert _tag_nonverbal("ふんふん") == "ふんふん"
-    assert _tag_nonverbal("工夫う") == "工夫う"
-    assert _tag_nonverbal(_tag_nonverbal("ふぅ…")) == "😮‍💨ふぅ…"
-
-
 def _fake_run(by_length: dict):
     """書き起こしの代わり。渡された音声の長さに一番近い鍵（秒）の文を返す。"""
     return lambda piece: by_length[min(by_length, key=lambda k: abs(k - len(piece) / SR))]
@@ -186,7 +175,6 @@ if __name__ == "__main__":
     test_trim_keeps_margin_at_both_ends()
     test_trim_caps_inner_pause_only_when_asked()
     test_trim_leaves_silent_clip_alone()
-    test_tags_sighs_laughs_humming()
     test_short_pause_stays_one_chunk()
     test_long_pause_splits()
     test_quiet_phrase_is_kept()
