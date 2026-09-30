@@ -171,6 +171,25 @@ v4.1-Small と構造が同じ（safetensors のキー 714 件と全ての形状�
 
 ---
 
+## 検討中の機能
+
+今後の対応を検討・予定している機能です。
+
+- YukkuriMovieMaker（YMM4）のプラグインとして、YMM4 の中から呼び出せるようにする
+- VOICEVOX 互換の API（VOICEVOX に対応したアプリから呼び出せるようにする）
+- CSV・Markdown の台本読み込み（行ごとに話者を指定して一括生成）
+- 出力後に、セリフとファイル名の対応表を CSV に書き出す
+- v4-Large の正式対応（いまはベータ）
+- v4-Large の軽量動作（量子化版で、少ない VRAM でも動かす）
+- v4.1-Small-MF への対応（少ないステップで速く生成）
+- Claude・Codex の出力の読み上げ
+- WAV に埋め込んだ生成条件の読み込み（同じ設定で作り直す）
+
+進み具合や新しい機能は X（[@Lo_Ai_girl](https://x.com/Lo_Ai_girl)）でお知らせします。
+要望は Issues へどうぞ。
+
+---
+
 ## ライセンス
 
 コードは MIT（[LICENSE](LICENSE)）。
