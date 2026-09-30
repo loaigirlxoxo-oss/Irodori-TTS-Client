@@ -1,6 +1,6 @@
 {
   "name": "irodori-desktop",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Irodori-TTS Desktop Application",
   "main": "main.js",
   "scripts": {
