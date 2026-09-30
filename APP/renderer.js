@@ -1996,6 +1996,8 @@ const DS_DEFAULTS = {
 // 伸ばすだけなので切る（0.1 秒は残す）。中の間は演技なので縮めない。
 const DS_RECOMMENDED = { ...DS_DEFAULTS, trim: true, tagNonverbal: true };
 const DS_OPTIONS_KEY = 'ds-options-v1';
+// これより長い音源を「分割しない」で流す前に確かめる（学習の1本は長くても20秒前後）
+const DS_LONG_SOURCE_SEC = 60;
 
 function readDsOptions() {
   const out = {};
@@ -2114,13 +2116,18 @@ async function probeSources(recommend) {
   return res.json();
 }
 
+// 音源ごとの長さ（秒）。分割しないで長い音源を流す前の確認に使う
+let dsSourceDurations = {};
+
 async function renderSourceSummary() {
   const el = document.getElementById('ds-src-sum');
   if (!el) return;
+  dsSourceDurations = {};
   if (dsSourceFiles.length === 0) { el.innerHTML = ''; return; }
   el.innerHTML = `<span>${dsSourceFiles.length} ファイル ・ 長さを測っています…</span>`;
   try {
     const p = await probeSources(false);
+    for (const f of p.files || []) dsSourceDurations[f.path] = f.duration;
     const bad = (p.unreadable || []).length;
     el.innerHTML =
       `<span>音源 <b>${(p.files || []).length}</b> ファイル</span>` +
@@ -2159,6 +2166,8 @@ async function recommendDsOptions() {
       asrModel: rec.asr_model,
     });
     saveDsOptions();
+    // 変わった項目が見えるように、畳んである詳細設定を開く
+    document.getElementById('ds-more').open = true;
     const gpu = rec.gpu && rec.gpu.name ? `（${rec.gpu.name}）` : '';
     note.textContent =
       `おすすめの値を入れました。${splitReason}。${rec.asr_reason}${gpu}。` +
@@ -2284,6 +2293,16 @@ async function processSources() {
     alert('最長は最短より長くしてください。');
     return;
   }
+  if (o.splitMethod === 'none') {
+    // 1 本が長い音源を分割しないで流すと、学習に使えない長いクリップが1本できるだけ
+    const long = dsSourceFiles.filter(s => (dsSourceDurations[s.path] || 0) > DS_LONG_SOURCE_SEC);
+    if (long.length) {
+      const names = long.slice(0, 3).map(s => `${s.name}（${formatDuration(dsSourceDurations[s.path])}）`).join('、');
+      const more = long.length > 3 ? ` ほか ${long.length - 3} 本` : '';
+      if (!confirm(`切り方が「分割しない」ですが、長い音源があります：${names}${more}。\n` +
+                   `このままだと、それぞれが1本のクリップになります。このまま実行しますか？`)) return;
+    }
+  }
   const models = o.asrModel === 'both' ? ['anime-whisper', 'qwen3-asr'] : [o.asrModel];
   if (models.includes('qwen3-asr')) {
     await refreshQwenState();
@@ -2307,7 +2326,10 @@ async function processSources() {
         status.textContent = `読み込み (${i + 1}/${dsSourceFiles.length}): ${src.name}`;
         chunkList = [{ path: src.path, duration: null, raw_duration: null }];
       } else {
-        status.textContent = `分割 (${i + 1}/${dsSourceFiles.length}): ${src.name}`;
+        const len = dsSourceDurations[src.path];
+        status.textContent = `分割中 (${i + 1}/${dsSourceFiles.length})：${src.name}` +
+          (len ? `（${formatDuration(len)}）` : '') +
+          (o.splitMethod === 'none' ? ' の前後を切っています…' : ' から声を探しています…');
         const splitRes = await fetch(`${API_URL}/audio/split`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
@@ -2331,6 +2353,9 @@ async function processSources() {
         }
         const split = await splitRes.json();
         chunkList = split.chunks;
+        if (o.splitMethod !== 'none') {
+          status.textContent = `${src.name} を ${chunkList.length} 個に分けました。書き起こしを始めます…`;
+        }
       }
 
       for (let c = 0; c < chunkList.length; c += 1) {
