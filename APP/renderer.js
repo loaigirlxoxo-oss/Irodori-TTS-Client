@@ -5223,6 +5223,12 @@ async function easyRunAll() {
         const total = s.tune_total || 1;
         easyBar('easy-gen-bar', (done / total) * 100);
         easySay(2, `声を調整しています ${done} / ${total} 本`);
+      } else if (s.state === 'splitting') {
+        // データセットタブのおすすめと同じ切り方で分けている段
+        const done = s.split_done || 0;
+        const total = s.split_total || 1;
+        easyBar('easy-gen-bar', (done / total) * 100);
+        easySay(2, `音声を分けています ${done} / ${total} 本`);
       } else if (s.state === 'screening') {
         // 生成のあと、失敗作を落とす工程が入る
         const done = s.screened || 0;

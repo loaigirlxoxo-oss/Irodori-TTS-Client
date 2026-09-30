@@ -12,6 +12,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import threading
 import time
 import urllib.request
@@ -771,16 +772,42 @@ def _tune_folder_files(
     return done
 
 
-def _run_folder(job_id: str, req: FolderRequest) -> None:
-    """フォルダの音声を書き起こしてデータセットにする。
+def _split_like_dataset_tab(job_id: str, status: dict, files: list[Path],
+                            staging_dirs: list[str]) -> list[Path]:
+    """データセットタブの「おすすめ」と同じ切り方で分け、頭と尻の無音を切る。
 
-    生成はしない。すでにある音声をそのまま素材にするので、必要なのは
-    読み上げ内容を付けることだけ。書き起こしは anime-whisper に任せる。
+    1ファイル＝1本のまま流すと、長い録音が丸ごと1本の素材になる
+    （14分の音源で実際に起きた）。切り方は音源を測って決める。
+    """
+    from server_audio import ProbeRequest, SplitRequest, probe_sources, split_audio
+
+    status.update(state="splitting", split_done=0, split_total=len(files))
+    _write_status(job_id, status)
+    rec = json.loads(probe_sources(ProbeRequest(paths=[str(f) for f in files])).body)["recommended"]
+    extra = {"min_sec": rec["min_sec"]} if rec.get("min_sec") is not None else {}
+    pieces: list[Path] = []
+    for i, f in enumerate(files, start=1):
+        res = json.loads(split_audio(SplitRequest(path=str(f), method=rec["method"], trim=True, **extra)).body)
+        if res.get("staging_dir"):
+            staging_dirs.append(res["staging_dir"])
+        pieces.extend(Path(c["path"]) for c in res["chunks"])
+        status["split_done"] = i
+        _write_status(job_id, status)
+    return pieces
+
+
+def _run_folder(job_id: str, req: FolderRequest) -> None:
+    """フォルダの音声を分けて書き起こし、データセットにする。
+
+    生成はしない。すでにある音声を素材にするので、データセットタブの
+    「おすすめ」と同じく分割と前後の空白カットをしてから、読み上げ内容を
+    付ける。書き起こしは anime-whisper に任せる。
     """
     from easy_eval import transcribe
 
     status = _read_status(job_id) or {}
     tuned: list[str] = []
+    staging_dirs: list[str] = []
     try:
         folder = Path(req.folder)
         # フォルダが許可された場所にあっても、中身が同じとは限らない。
@@ -797,6 +824,9 @@ def _run_folder(job_id: str, req: FolderRequest) -> None:
         files = _tune_folder_files(job_id, status, files, req)
         # 加工したぶんだけ控える。加工していなければ元のファイルなので触らない。
         tuned.extend(str(f) for f in files if f not in before)
+        files = _split_like_dataset_tab(job_id, status, files, staging_dirs)
+        if not files:
+            raise RuntimeError(f"声の入った部分が見つかりません: {folder}")
 
         status.update(total=len(files), done=0, clips=[], state="running")
         _write_status(job_id, status)
@@ -844,6 +874,9 @@ def _run_folder(job_id: str, req: FolderRequest) -> None:
                 Path(w).unlink(missing_ok=True)
             except OSError:
                 pass
+        # 分けた音声はデータセットへ写し終えたら用済み。失敗しても消す。
+        for d in staging_dirs:
+            shutil.rmtree(d, ignore_errors=True)
         # 書き起こしのモデルを抱えたままにしない。画面はこの直後に学習を
         # 始めるので、残っていると学習側と二重に載る（生成の経路では
         # _run_generate が同じことをしている）。
