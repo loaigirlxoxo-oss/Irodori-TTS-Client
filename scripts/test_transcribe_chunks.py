@@ -94,21 +94,19 @@ def test_join_adds_comma_only_between_unpunctuated() -> None:
 
 def test_trim_keeps_margin_at_both_ends() -> None:
     audio = np.concatenate([_silence(0.8), _tone(1.0), _silence(0.8)])
-    out = _trim_silence(audio, SR, floor_db=45.0, keep_sec=0.1, max_inner_sec=0.0)
+    out = _trim_silence(audio, SR, floor_db=45.0, keep_sec=0.1)
     assert abs(len(out) / SR - 1.2) < 0.03
 
 
-def test_trim_caps_inner_pause_only_when_asked() -> None:
+def test_trim_keeps_inner_pause() -> None:
     audio = np.concatenate([_tone(1.0), _silence(2.0), _tone(1.0)])
-    kept = _trim_silence(audio, SR, floor_db=45.0, keep_sec=0.0, max_inner_sec=0.0)
-    capped = _trim_silence(audio, SR, floor_db=45.0, keep_sec=0.0, max_inner_sec=0.5)
+    kept = _trim_silence(audio, SR, floor_db=45.0, keep_sec=0.0)
     assert abs(len(kept) / SR - 4.0) < 0.03
-    assert abs(len(capped) / SR - 2.5) < 0.03
 
 
 def test_trim_leaves_silent_clip_alone() -> None:
     audio = _silence(1.0)
-    assert len(_trim_silence(audio, SR, 45.0, 0.1, 0.0)) == len(audio)
+    assert len(_trim_silence(audio, SR, 45.0, 0.1)) == len(audio)
 
 
 def _fake_run(by_length: dict):
@@ -173,7 +171,7 @@ if __name__ == "__main__":
     test_contained_ignores_spelling()
     test_rewind_escape_bans_the_ninth_repeat()
     test_trim_keeps_margin_at_both_ends()
-    test_trim_caps_inner_pause_only_when_asked()
+    test_trim_keeps_inner_pause()
     test_trim_leaves_silent_clip_alone()
     test_short_pause_stays_one_chunk()
     test_long_pause_splits()

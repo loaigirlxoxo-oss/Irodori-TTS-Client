@@ -1980,7 +1980,6 @@ const DS_OPTION_FIELDS = {
   trim: ['ds-trim', 'bool'],
   trimKeep: ['ds-trim-keep', 'num'],
   trimFloor: ['ds-trim-floor', 'num'],
-  innerCap: ['ds-inner-cap', 'num'],
   minSilence: ['ds-min-silence', 'num'],
   speechPad: ['ds-speech-pad', 'num'],
   levelFloor: ['ds-level-floor', 'num'],
@@ -1988,7 +1987,7 @@ const DS_OPTION_FIELDS = {
 const DS_DEFAULTS = {
   splitMethod: 'vad', minSec: 3, maxSec: 20, asrModel: 'anime-whisper', vocab: '',
   chunkGap: 0.6, asrFloor: 45, npr: 0,
-  trim: false, trimKeep: 100, trimFloor: 45, innerCap: 0,
+  trim: false, trimKeep: 100, trimFloor: 45,
   minSilence: 500, speechPad: 400, levelFloor: 45,
 };
 // 学習用のデータとしてのおすすめ。頭と尻の無音は学習の長さの見積もりを
@@ -2040,7 +2039,7 @@ function syncDsOptionState() {
   ['ds-min-silence', 'ds-speech-pad'].forEach(id => { document.getElementById(id).disabled = !splitting; });
   document.getElementById('ds-level-floor').disabled = method !== 'level';
   const trim = document.getElementById('ds-trim').checked;
-  ['ds-trim-keep', 'ds-trim-floor', 'ds-inner-cap'].forEach(id => { document.getElementById(id).disabled = !trim; });
+  ['ds-trim-keep', 'ds-trim-floor'].forEach(id => { document.getElementById(id).disabled = !trim; });
   const model = dsAsrModel().value;
   document.getElementById('ds-vocab').disabled = model === 'anime-whisper';
   document.getElementById('ds-npr').disabled = model === 'qwen3-asr';
@@ -2337,7 +2336,6 @@ async function processSources() {
             trim: o.trim,
             trim_keep_ms: Math.round(o.trimKeep),
             trim_floor_db: o.trimFloor,
-            max_inner_silence_ms: Math.round(o.innerCap),
           })
         });
         if (!splitRes.ok) {

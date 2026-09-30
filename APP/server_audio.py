@@ -154,15 +154,27 @@ def _get_whisper_model():
     return _whisper_model
 
 
+# transformers imports its classes lazily; two request threads importing them
+# for the first time at once made one fail with "cannot import name", so the
+# recommendation said Qwen3-ASR was missing (seen on the first おすすめ).
+_qwen_import_lock = threading.Lock()
+_qwen_import_ok = False
+
+
 def _qwen_supported() -> tuple[bool, str]:
     """Whether the installed transformers can run Qwen3-ASR at all."""
-    try:
-        from transformers import AutoModelForMultimodalLM  # noqa: F401
-        from transformers import Qwen3ASRForConditionalGeneration  # noqa: F401
-    except Exception:  # noqa: BLE001
-        import transformers
-        return False, f"transformers {transformers.__version__} は Qwen3-ASR に対応していません"
-    return True, ""
+    global _qwen_import_ok
+    with _qwen_import_lock:
+        if _qwen_import_ok:
+            return True, ""
+        try:
+            from transformers import AutoModelForMultimodalLM  # noqa: F401
+            from transformers import Qwen3ASRForConditionalGeneration  # noqa: F401
+        except Exception:  # noqa: BLE001
+            import transformers
+            return False, f"transformers {transformers.__version__} は Qwen3-ASR に対応していません"
+        _qwen_import_ok = True
+        return True, ""
 
 
 # Files the processor and model read. Checked one by one: snapshot_download
@@ -316,7 +328,6 @@ class SplitRequest(BaseModel):
     trim: bool = Field(False, description="Cut silence at the head and tail of each clip")
     trim_keep_ms: int = Field(100, ge=0, description="Silence left in front of / after the voice")
     trim_floor_db: float = Field(45.0, gt=0.0, description="Below peak minus this counts as silence")
-    max_inner_silence_ms: int = Field(0, ge=0, description="Shorten pauses inside a clip to this; 0 keeps them")
     output_sample_rate: int = Field(48000, description="Output wav sample rate (Hz)")
 
 
@@ -357,9 +368,8 @@ def _vad_segments(src: Path, req: SplitRequest) -> list[tuple[float, float]]:
     return [(float(ts["start"]), float(ts["end"])) for ts in timestamps]
 
 
-def _trim_silence(clip: np.ndarray, sr: int, floor_db: float, keep_sec: float,
-                  max_inner_sec: float) -> np.ndarray:
-    """Cut silence at both ends, keeping keep_sec; optionally cap inner pauses.
+def _trim_silence(clip: np.ndarray, sr: int, floor_db: float, keep_sec: float) -> np.ndarray:
+    """Cut silence at both ends, keeping keep_sec. Pauses inside are acting; never touched.
 
     Silence is judged against the clip's own peak, so a quiet recording is
     trimmed the same way as a loud one. A clip with no sound is returned as is.
@@ -375,25 +385,7 @@ def _trim_silence(clip: np.ndarray, sr: int, floor_db: float, keep_sec: float,
     keep = int(keep_sec * sr)
     head = max(0, idx[0] * hop - keep)
     tail = min(len(clip), (idx[-1] + 1) * hop + keep)
-    if max_inner_sec <= 0:
-        return clip[head:tail]
-    # Shorten each quiet run inside the voice to max_inner_sec, cutting its middle.
-    limit = int(max_inner_sec / CHUNK_FRAME_SEC)
-    pieces, cursor = [], head
-    run_start = None
-    for i in range(idx[0], idx[-1] + 1):
-        if not sounding[i]:
-            if run_start is None:
-                run_start = i
-            continue
-        if run_start is not None and i - run_start > limit:
-            left = (run_start + limit // 2) * hop
-            right = (i - (limit - limit // 2)) * hop
-            pieces.append(clip[cursor:left])
-            cursor = right
-        run_start = None
-    pieces.append(clip[cursor:tail])
-    return np.concatenate(pieces)
+    return clip[head:tail]
 
 
 @router.post("/api/v1/audio/split")
@@ -436,8 +428,7 @@ def split_audio(req: SplitRequest) -> JSONResponse:
         clip = audio_out[int(start_sec * out_sr):int(end_sec * out_sr)]
         raw_len = len(clip) / out_sr
         if req.trim:
-            clip = _trim_silence(clip, out_sr, req.trim_floor_db, req.trim_keep_ms / 1000.0,
-                                 req.max_inner_silence_ms / 1000.0)
+            clip = _trim_silence(clip, out_sr, req.trim_floor_db, req.trim_keep_ms / 1000.0)
         chunk_path = out_dir / f"chunk_{i:04d}.wav"
         sf.write(str(chunk_path), clip, out_sr)
         chunks.append({
