@@ -298,6 +298,84 @@ def transcribe(req: TranscribeRequest) -> JSONResponse:
             _whisper_users -= 1
 
 
+# === Sound-chunked transcription ===
+# Anime-whisper was trained on one game line per file, so a pause inside a
+# clip reads to it as "the line is over": it stops and drops everything after
+# the pause. Measured on a 1154-clip dataset: 103 clips (9%) had their second
+# sentence missing, and a LoRA trained on it learned to keep talking after the
+# text ends. Its encoder also only sees 30 s, so longer files lost their tail.
+# We therefore cut the audio into sounding chunks by level and transcribe each
+# chunk on its own. A clip without a long pause stays one chunk, as before.
+CHUNK_FRAME_SEC = 0.01
+CHUNK_FLOOR_DB = 45.0      # below peak; low enough to keep quiet phrases and sighs
+CHUNK_ABS_FLOOR_DBFS = -70.0  # digital silence / hiss is never a chunk, however flat the file
+# Shorter pauses stay inside one chunk. Swept 0.35/0.5/0.6/0.8 s: 0.6 gave the
+# lowest CER on untouched clips (0.025), while 0.8 already missed dropped tails
+# again (CER 0.043 -> 0.092 on the clips that had lost their second sentence).
+CHUNK_JOIN_GAP_SEC = 0.6
+CHUNK_MIN_SEC = 0.10       # shorter blips (clicks) are not transcribed
+CHUNK_MAX_SEC = 28.0       # stay inside the 30 s encoder window
+CHUNK_PAD_SEC = 0.05
+_SENTENCE_END = ("、", "。", "…", "!", "?", "！", "？", "♪")
+
+
+def _frame_levels_db(audio_16k: np.ndarray, sr: int) -> np.ndarray:
+    hop = int(sr * CHUNK_FRAME_SEC)
+    n = len(audio_16k) // hop
+    if n == 0:
+        return np.zeros(0)
+    frames = audio_16k[: n * hop].reshape(n, hop)
+    return 20.0 * np.log10(np.sqrt((frames ** 2).mean(axis=1)) + 1e-9)
+
+
+def _split_long(start: int, end: int, levels: np.ndarray, max_frames: int) -> list[tuple[int, int]]:
+    """Cut a run longer than max_frames at its quietest frame, recursively."""
+    if end - start <= max_frames:
+        return [(start, end)]
+    lo, hi = start + max_frames // 2, start + max_frames
+    cut = lo + int(np.argmin(levels[lo:hi]))
+    return [(start, cut)] + _split_long(cut, end, levels, max_frames)
+
+
+def _sound_chunks(audio_16k: np.ndarray, sr: int) -> list[tuple[float, float]]:
+    """(start_sec, end_sec) of each sounding chunk, in order."""
+    levels = _frame_levels_db(audio_16k, sr)
+    if levels.size == 0:
+        return []
+    sounding = (levels > levels.max() - CHUNK_FLOOR_DB) & (levels > CHUNK_ABS_FLOOR_DBFS)
+    runs: list[list[int]] = []
+    start = None
+    for i, on in enumerate(list(sounding) + [False]):
+        if on and start is None:
+            start = i
+        elif not on and start is not None:
+            if runs and start - runs[-1][1] < CHUNK_JOIN_GAP_SEC / CHUNK_FRAME_SEC:
+                runs[-1][1] = i
+            else:
+                runs.append([start, i])
+            start = None
+    max_frames = int(CHUNK_MAX_SEC / CHUNK_FRAME_SEC)
+    chunks = []
+    for s, e in runs:
+        if e - s < CHUNK_MIN_SEC / CHUNK_FRAME_SEC:
+            continue
+        for cs, ce in _split_long(s, e, levels, max_frames):
+            chunks.append((cs * CHUNK_FRAME_SEC, ce * CHUNK_FRAME_SEC))
+    return chunks
+
+
+def _join_chunk_texts(texts: list[str]) -> str:
+    """Join chunk transcripts; a pause between chunks becomes a comma."""
+    out = ""
+    for t in texts:
+        if not t:
+            continue
+        if out and not out.endswith(_SENTENCE_END):
+            out += "、"
+        out += t
+    return out
+
+
 def _transcribe_inner(req: "TranscribeRequest", src) -> JSONResponse:
     state = _get_whisper_model()
     processor = state["processor"]
@@ -308,22 +386,28 @@ def _transcribe_inner(req: "TranscribeRequest", src) -> JSONResponse:
     audio_16k, sr = _load_audio_for_pipeline(src)
     duration_sec = float(len(audio_16k)) / float(sr)
 
-    features = processor(audio_16k, sampling_rate=sr, return_tensors="pt").input_features
-    features = features.to(device=device, dtype=dtype)
+    def run(piece: np.ndarray) -> str:
+        features = processor(piece, sampling_rate=sr, return_tensors="pt").input_features
+        features = features.to(device=device, dtype=dtype)
+        with torch.inference_mode():
+            predicted_ids = model.generate(
+                features,
+                language=req.language,
+                task="transcribe",
+                no_repeat_ngram_size=int(req.no_repeat_ngram_size),
+                repetition_penalty=float(req.repetition_penalty),
+            )
+        return processor.batch_decode(predicted_ids, skip_special_tokens=True)[0].strip()
 
-    with torch.inference_mode():
-        predicted_ids = model.generate(
-            features,
-            language=req.language,
-            task="transcribe",
-            no_repeat_ngram_size=int(req.no_repeat_ngram_size),
-            repetition_penalty=float(req.repetition_penalty),
-        )
-    text = processor.batch_decode(predicted_ids, skip_special_tokens=True)[0].strip()
+    segments = []
+    for start, end in _sound_chunks(audio_16k, sr):
+        a = int(max(0.0, start - CHUNK_PAD_SEC) * sr)
+        b = int(min(duration_sec, end + CHUNK_PAD_SEC) * sr)
+        segments.append({"start": round(start, 3), "end": round(end, 3), "text": run(audio_16k[a:b])})
 
     return JSONResponse(content={
-        "text": text,
-        "segments": [],
+        "text": _join_chunk_texts([s["text"] for s in segments]),
+        "segments": segments,
         "duration": round(duration_sec, 3),
         "language": "ja",
         "language_probability": 1.0,
