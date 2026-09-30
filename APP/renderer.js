@@ -1944,8 +1944,10 @@ const dsBrowseFolderBtn = () => document.getElementById('ds-browse-folder-btn');
 const dsSources = () => document.getElementById('ds-sources');
 const dsMinSec = () => document.getElementById('ds-min-sec');
 const dsMaxSec = () => document.getElementById('ds-max-sec');
-const dsSkipSplit = () => document.getElementById('ds-skip-split');
+const dsSplitMethod = () => document.getElementById('ds-split-method');
 const dsVadControls = () => document.getElementById('ds-vad-controls');
+const dsAsrModel = () => document.getElementById('ds-asr-model');
+const dsRecommendNote = () => document.getElementById('ds-recommend-note');
 const dsProcessBtn = () => document.getElementById('ds-process-btn');
 const dsProcessStatus = () => document.getElementById('ds-process-status');
 const dsClipsBody = () => document.getElementById('ds-clips-body');
@@ -1958,8 +1960,199 @@ const dsTargetPath = () => document.getElementById('ds-target-path');
 const dsTargetReset = () => document.getElementById('ds-target-reset');
 
 let dsSourceFiles = [];   // [{ path, name }]
-let dsCurrentClips = [];  // [{ index, path, text, duration, source, excluded }]
+// [{ index, path, text, duration, rawDuration, source, excluded, alt, diff }]
+//   alt: 「両方」で書き起こしたときの Qwen3-ASR の結果。diff: 2 つが食い違った
+let dsCurrentClips = [];
 let dsTargetDir = null;   // optional custom save folder; null means use app default
+
+// ── 工程 2 の設定 ─────────────────────────────────
+// 既定は 1.2.1 と同じ挙動。「おすすめを入れる」は DS_RECOMMENDED に、
+// 切り方だけ音源を測って決める。入力欄の id と値の型をここで一か所にまとめる。
+const DS_OPTION_FIELDS = {
+  splitMethod: ['ds-split-method', 'str'],
+  minSec: ['ds-min-sec', 'num'],
+  maxSec: ['ds-max-sec', 'num'],
+  asrModel: ['ds-asr-model', 'str'],
+  vocab: ['ds-vocab', 'str'],
+  chunkGap: ['ds-chunk-gap', 'num'],
+  asrFloor: ['ds-asr-floor', 'num'],
+  npr: ['ds-npr', 'num'],
+  tagNonverbal: ['ds-tag-nonverbal', 'bool'],
+  trim: ['ds-trim', 'bool'],
+  trimKeep: ['ds-trim-keep', 'num'],
+  trimFloor: ['ds-trim-floor', 'num'],
+  innerCap: ['ds-inner-cap', 'num'],
+  minSilence: ['ds-min-silence', 'num'],
+  speechPad: ['ds-speech-pad', 'num'],
+  levelFloor: ['ds-level-floor', 'num'],
+};
+const DS_DEFAULTS = {
+  splitMethod: 'vad', minSec: 3, maxSec: 20, asrModel: 'anime-whisper', vocab: '',
+  chunkGap: 0.6, asrFloor: 45, npr: 0, tagNonverbal: false,
+  trim: false, trimKeep: 100, trimFloor: 45, innerCap: 0,
+  minSilence: 500, speechPad: 400, levelFloor: 45,
+};
+// 学習用のデータとしてのおすすめ。頭と尻の無音は学習の長さの見積もりを
+// 伸ばすだけなので切る（0.1 秒は残す）。中の間は演技なので縮めない。
+const DS_RECOMMENDED = { ...DS_DEFAULTS, trim: true, tagNonverbal: true };
+const DS_OPTIONS_KEY = 'ds-options-v1';
+
+function readDsOptions() {
+  const out = {};
+  for (const [key, [id, type]] of Object.entries(DS_OPTION_FIELDS)) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    if (type === 'bool') out[key] = el.checked;
+    else if (type === 'num') {
+      const v = parseFloat(el.value);
+      out[key] = Number.isFinite(v) ? v : DS_DEFAULTS[key];
+    } else out[key] = el.value;
+  }
+  return out;
+}
+
+function applyDsOptions(opts) {
+  for (const [key, [id, type]] of Object.entries(DS_OPTION_FIELDS)) {
+    const el = document.getElementById(id);
+    if (!el || opts[key] === undefined) continue;
+    if (type === 'bool') el.checked = !!opts[key];
+    else el.value = opts[key];
+  }
+  syncDsOptionState();
+}
+
+function saveDsOptions() {
+  try { localStorage.setItem(DS_OPTIONS_KEY, JSON.stringify(readDsOptions())); } catch (_) { /* 保存できなくても動く */ }
+}
+
+function loadDsOptions() {
+  let saved = null;
+  try { saved = JSON.parse(localStorage.getItem(DS_OPTIONS_KEY) || 'null'); } catch (_) { saved = null; }
+  applyDsOptions({ ...DS_DEFAULTS, ...(saved || {}) });
+}
+
+// 選んだ切り方・モデルで意味のない欄は触れないようにする
+function syncDsOptionState() {
+  const method = dsSplitMethod().value;
+  dsVadControls().querySelectorAll('input[type="number"]').forEach(el => { el.disabled = method === 'none'; });
+  const splitting = method !== 'none';
+  ['ds-min-silence', 'ds-speech-pad'].forEach(id => { document.getElementById(id).disabled = !splitting; });
+  document.getElementById('ds-level-floor').disabled = method !== 'level';
+  const trim = document.getElementById('ds-trim').checked;
+  ['ds-trim-keep', 'ds-trim-floor', 'ds-inner-cap'].forEach(id => { document.getElementById(id).disabled = !trim; });
+  const model = dsAsrModel().value;
+  document.getElementById('ds-vocab').disabled = model === 'anime-whisper';
+  document.getElementById('ds-npr').disabled = model === 'qwen3-asr';
+  refreshQwenState();
+}
+
+// ── Qwen3-ASR の有無 ───────────────────────────────
+let dsQwenInfo = null;
+let dsQwenPoll = null;
+
+async function refreshQwenState() {
+  const state = document.getElementById('ds-qwen-state');
+  const dl = document.getElementById('ds-qwen-dl');
+  const wantsQwen = dsAsrModel().value !== 'anime-whisper';
+  try {
+    const res = await fetch(`${API_URL}/audio/asr_models`);
+    const json = await res.json();
+    dsQwenInfo = (json.models || []).find(m => m.id === 'qwen3-asr') || null;
+  } catch (err) {
+    dsQwenInfo = null;
+  }
+  dl.classList.add('hidden');
+  state.textContent = '';
+  if (!wantsQwen || !dsQwenInfo) return;
+  const running = dsQwenInfo.download && dsQwenInfo.download.state === 'running';
+  if (dsQwenInfo.ready) {
+    state.textContent = 'Qwen3-ASR は取得済みです。';
+  } else if (!dsQwenInfo.supported) {
+    state.textContent = `Qwen3-ASR は使えません：${dsQwenInfo.reason}`;
+  } else if (running) {
+    state.textContent = `Qwen3-ASR を取得しています（約 ${dsQwenInfo.size_gb}GB）…`;
+  } else {
+    const err = dsQwenInfo.download && dsQwenInfo.download.error;
+    state.textContent = err
+      ? `取得に失敗しました：${err}`
+      : `Qwen3-ASR はまだ取得していません（約 ${dsQwenInfo.size_gb}GB）。`;
+    dl.classList.remove('hidden');
+  }
+  if (running && !dsQwenPoll) {
+    dsQwenPoll = setTimeout(() => { dsQwenPoll = null; refreshQwenState(); }, 5000);
+  }
+}
+
+async function downloadQwen() {
+  const dl = document.getElementById('ds-qwen-dl');
+  dl.disabled = true;
+  try {
+    const res = await fetch(`${API_URL}/audio/asr_models/qwen3-asr/download`, { method: 'POST' });
+    if (!res.ok) {
+      const err = await res.json().catch(() => ({}));
+      throw new Error(err.detail || `status ${res.status}`);
+    }
+  } catch (err) {
+    document.getElementById('ds-qwen-state').textContent = `取得を始められませんでした：${err.message}`;
+  } finally {
+    dl.disabled = false;
+    refreshQwenState();
+  }
+}
+
+// ── 音源の合計時間と、おすすめ ─────────────────────
+async function probeSources(recommend) {
+  const res = await fetch(`${API_URL}/audio/probe`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ paths: dsSourceFiles.map(s => s.path), recommend }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.detail || `status ${res.status}`);
+  }
+  return res.json();
+}
+
+async function renderSourceSummary() {
+  const el = document.getElementById('ds-src-sum');
+  if (!el) return;
+  if (dsSourceFiles.length === 0) { el.innerHTML = ''; return; }
+  el.innerHTML = `<span>${dsSourceFiles.length} ファイル ・ 長さを測っています…</span>`;
+  try {
+    const p = await probeSources(false);
+    const bad = (p.unreadable || []).length;
+    el.innerHTML =
+      `<span>音源 <b>${(p.files || []).length}</b> ファイル</span>` +
+      `<span>合計 <b>${formatDuration(p.total_duration)}</b></span>` +
+      (bad ? `<span>読めないファイル <b>${bad}</b></span>` : '');
+  } catch (err) {
+    el.innerHTML = `<span>長さを測れませんでした：${escapeHtml(err.message)}</span>`;
+  }
+}
+
+async function recommendDsOptions() {
+  const note = dsRecommendNote();
+  if (dsSourceFiles.length === 0) {
+    applyDsOptions({ ...DS_RECOMMENDED, vocab: document.getElementById('ds-vocab').value });
+    note.textContent = 'おすすめの値を入れました。切り方は音源を足してから測ります。';
+    saveDsOptions();
+    return;
+  }
+  note.textContent = '音源を測っています…';
+  try {
+    const p = await probeSources(true);
+    applyDsOptions({
+      ...DS_RECOMMENDED,
+      vocab: document.getElementById('ds-vocab').value,
+      splitMethod: p.recommended.method,
+    });
+    note.textContent = `おすすめの値を入れました。${p.recommended.reason}。前後の無音は 0.1 秒残して切り、溜息・笑いにはタグを付けます。`;
+    saveDsOptions();
+  } catch (err) {
+    note.textContent = `測れませんでした：${err.message}`;
+  }
+}
 
 function escapeHtmlAttr(s) {
   return String(s).replace(/[&<>"']/g, c => ({
@@ -2043,6 +2236,7 @@ function addSourceFiles(paths) {
     dsSourceFiles.push({ path: p, name });
   }
   renderSources();
+  renderSourceSummary();
 }
 
 function renderSources() {
@@ -2058,6 +2252,7 @@ function renderSources() {
     li.querySelector('.ds-remove').addEventListener('click', () => {
       dsSourceFiles = dsSourceFiles.filter(x => x.path !== s.path);
       renderSources();
+      renderSourceSummary();
     });
     ul.appendChild(li);
   }
@@ -2068,9 +2263,20 @@ async function processSources() {
     alert('Add at least one audio file first.');
     return;
   }
-  const skipSplit = dsSkipSplit().checked;
-  const minSec = parseFloat(dsMinSec().value);
-  const maxSec = parseFloat(dsMaxSec().value);
+  const o = readDsOptions();
+  saveDsOptions();
+  if (o.splitMethod !== 'none' && !(o.maxSec > o.minSec)) {
+    alert('最長は最短より長くしてください。');
+    return;
+  }
+  const models = o.asrModel === 'both' ? ['anime-whisper', 'qwen3-asr'] : [o.asrModel];
+  if (models.includes('qwen3-asr')) {
+    await refreshQwenState();
+    if (!dsQwenInfo || !dsQwenInfo.ready) {
+      alert('Qwen3-ASR がまだ使えません。詳細設定の「書き起こし」で取得してください。');
+      return;
+    }
+  }
   dsProcessBtn().disabled = true;
   dsCurrentClips = [];
   renderClipsTable();
@@ -2081,16 +2287,28 @@ async function processSources() {
       const src = dsSourceFiles[i];
 
       let chunkList;
-      if (skipSplit) {
-        // Per-file mode: each source file is one clip, no Silero VAD.
-        status.textContent = `Loading (${i + 1}/${dsSourceFiles.length}): ${src.name}`;
-        chunkList = [{ path: src.path, duration: null }];
+      if (o.splitMethod === 'none' && !o.trim) {
+        // 1 ファイル＝1 クリップで加工もしないなら、元のファイルをそのまま使う
+        status.textContent = `読み込み (${i + 1}/${dsSourceFiles.length}): ${src.name}`;
+        chunkList = [{ path: src.path, duration: null, raw_duration: null }];
       } else {
-        status.textContent = `Splitting (${i + 1}/${dsSourceFiles.length}): ${src.name}`;
+        status.textContent = `分割 (${i + 1}/${dsSourceFiles.length}): ${src.name}`;
         const splitRes = await fetch(`${API_URL}/audio/split`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: src.path, min_sec: minSec, max_sec: maxSec })
+          body: JSON.stringify({
+            path: src.path,
+            method: o.splitMethod,
+            min_sec: o.minSec,
+            max_sec: o.maxSec,
+            min_silence_ms: Math.round(o.minSilence),
+            speech_pad_ms: Math.round(o.speechPad),
+            level_floor_db: o.levelFloor,
+            trim: o.trim,
+            trim_keep_ms: Math.round(o.trimKeep),
+            trim_floor_db: o.trimFloor,
+            max_inner_silence_ms: Math.round(o.innerCap),
+          })
         });
         if (!splitRes.ok) {
           const err = await splitRes.json().catch(() => ({}));
@@ -2102,26 +2320,44 @@ async function processSources() {
 
       for (let c = 0; c < chunkList.length; c += 1) {
         const chunk = chunkList[c];
-        status.textContent = `Transcribing ${src.name} ${skipSplit ? '' : `chunk ${c + 1}/${chunkList.length}`}…`;
-        const trRes = await fetch(`${API_URL}/audio/transcribe`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ path: chunk.path })
-        });
-        let text = '';
+        status.textContent = `書き起こし ${src.name} ${chunkList.length > 1 ? `${c + 1}/${chunkList.length}` : ''}…`;
+        const texts = [];
         let duration = chunk.duration;
-        if (trRes.ok) {
+        for (const model of models) {
+          const trRes = await fetch(`${API_URL}/audio/transcribe`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              path: chunk.path,
+              model,
+              no_repeat_ngram_size: Math.round(o.npr),
+              chunk_gap_sec: o.chunkGap,
+              floor_db: o.asrFloor,
+              vocabulary: model === 'qwen3-asr' ? o.vocab : '',
+              tag_nonverbal: o.tagNonverbal,
+            })
+          });
+          if (!trRes.ok) {
+            const err = await trRes.json().catch(() => ({}));
+            // モデルが無いなど、続けても全部失敗するものは止める
+            if (trRes.status === 409) throw new Error(err.detail || 'transcriber unavailable');
+            texts.push('');
+            continue;
+          }
           const tr = await trRes.json();
-          text = (tr.text || '').trim();
+          texts.push((tr.text || '').trim());
           if (duration == null && tr.duration != null) duration = tr.duration;
         }
         const clip = {
           index: dsCurrentClips.length,
           path: chunk.path,
-          text,
+          text: texts[0],
           duration,
+          rawDuration: chunk.raw_duration != null ? chunk.raw_duration : duration,
           source: src.name,
           excluded: false,
+          alt: texts.length > 1 ? texts[1] : null,
+          diff: texts.length > 1 && normalizeForDiff(texts[0]) !== normalizeForDiff(texts[1]),
         };
         dsCurrentClips.push(clip);
         appendClipRow(clip);
@@ -2130,7 +2366,9 @@ async function processSources() {
       }
     }
     renderClipsStats();
-    status.textContent = `Done. ${dsCurrentClips.length} clips ready.`;
+    const diffs = dsCurrentClips.filter(c => c.diff).length;
+    status.textContent = `完了。${dsCurrentClips.length} クリップ` +
+      (models.length > 1 ? `（2 つのモデルが食い違った行 ${diffs}）` : '');
     dsSaveBtn().disabled = dsCurrentClips.length === 0;
   } catch (err) {
     status.textContent = `Error: ${err.message}`;
@@ -2159,11 +2397,75 @@ function renderClipsStats() {
     return;
   }
   const total = active.reduce((s, c) => s + (Number(c.duration) || 0), 0);
+  const raw = active.reduce((s, c) => s + (Number(c.rawDuration) || Number(c.duration) || 0), 0);
   const avg = total / active.length;
+  const cut = raw - total;
+  const diffs = dsCurrentClips.filter(c => c.diff).length;
   el.innerHTML =
     `<span>採用 <b>${active.length}</b> / ${dsCurrentClips.length} クリップ</span>` +
     `<span>合計 <b>${formatDuration(total)}</b></span>` +
-    `<span>平均 <b>${avg.toFixed(1)}</b> 秒</span>`;
+    `<span>平均 <b>${avg.toFixed(1)}</b> 秒</span>` +
+    (cut >= 0.5 ? `<span>前後カットで <b>${formatDuration(cut)}</b> 短縮</span>` : '') +
+    (diffs ? `<span>食い違い <b>${diffs}</b> 行</span>` : '');
+}
+
+// 2 つのモデルの結果を比べるときに、句読点・記号・タグ・カタカナとひらがなの
+// 違いは食い違いに数えない（漢字とかなの違いは残る。そこは目で見る）
+function normalizeForDiff(s) {
+  return String(s || '')
+    .normalize('NFKC')
+    .replace(/[\s、。，．,.!?！？…「」『』・〜~ー\-]/g, '')
+    .replace(/\p{Extended_Pictographic}|‍|️/gu, '')
+    .replace(/[ァ-ヶ]/g, ch => String.fromCharCode(ch.charCodeAt(0) - 0x60));
+}
+
+// ── 一括置き換え ────────────────────────────────
+function parseReplaceFrom() {
+  return document.getElementById('ds-rep-from').value
+    .split(/[、,，\s]+/).map(w => w.trim()).filter(Boolean)
+    // 長い語から当てる（「小春」より先に「小春ちゃん」を置き換えたいとき）
+    .sort((a, b) => b.length - a.length);
+}
+
+function countReplacements(words) {
+  let hits = 0;
+  for (const c of dsCurrentClips) {
+    for (const w of words) hits += c.text.split(w).length - 1;
+  }
+  return hits;
+}
+
+function refreshReplaceCount() {
+  const words = parseReplaceFrom();
+  const to = document.getElementById('ds-rep-to').value;
+  const countEl = document.getElementById('ds-rep-count');
+  const btn = document.getElementById('ds-rep-apply');
+  if (words.length === 0 || dsCurrentClips.length === 0) {
+    countEl.textContent = '';
+    btn.disabled = true;
+    return;
+  }
+  const hits = countReplacements(words.filter(w => w !== to));
+  countEl.textContent = `${hits} か所`;
+  btn.disabled = hits === 0;
+}
+
+function applyReplacements() {
+  const words = parseReplaceFrom();
+  const to = document.getElementById('ds-rep-to').value;
+  let hits = 0;
+  for (const c of dsCurrentClips) {
+    let t = c.text;
+    for (const w of words) {
+      if (w === to) continue;
+      hits += t.split(w).length - 1;
+      t = t.split(w).join(to);
+    }
+    c.text = t;
+  }
+  renderClipsTable();
+  document.getElementById('ds-rep-count').textContent = `${hits} か所を置き換えました`;
+  document.getElementById('ds-rep-apply').disabled = true;
 }
 
 function getDsVol() {
@@ -2245,11 +2547,15 @@ async function drawClipWave(canvas, ratio) {
 function _buildClipRow(clip) {
   const tr = document.createElement('tr');
   if (clip.excluded) tr.classList.add('off');
+  if (clip.diff) tr.classList.add('diff');
   const audioSrc = `file://${clip.path.replace(/\\/g, '/')}`;
+  const alt = clip.alt == null ? '' : `
+      <div class="alt"><span class="who">Qwen3-ASR</span><span class="t">${escapeHtml(clip.alt)}</span>
+        <button class="btn btn-ghost btn-sm use-alt">こちらを使う</button></div>`;
   tr.innerHTML = `
     <td class="c-no">${clip.index + 1}</td>
     <td class="c-dur">${clip.duration}s</td>
-    <td class="c-txt"><input type="text" data-idx="${clip.index}" value="${escapeHtmlAttr(clip.text)}"></td>
+    <td class="c-txt"><input type="text" data-idx="${clip.index}" value="${escapeHtmlAttr(clip.text)}">${alt}</td>
     <td class="c-aud"><div>
       <button class="play play-sm tip" data-tip="聴く" aria-label="聴く"><svg class="i i-sm"><use href="#ic-play2"/></svg></button>
       <canvas class="mini-wave" data-src="${escapeHtmlAttr(audioSrc)}"></canvas>
@@ -2276,9 +2582,23 @@ function _buildClipRow(clip) {
 
   _waveObserver().observe(tr.querySelector('.mini-wave'));
 
-  tr.querySelector('input[type="text"]').addEventListener('input', (e) => {
+  const textInput = tr.querySelector('input[type="text"]');
+  textInput.addEventListener('input', (e) => {
     clip.text = e.target.value;
   });
+  const useAlt = tr.querySelector('.use-alt');
+  if (useAlt) {
+    useAlt.addEventListener('click', () => {
+      // 入れ替える。元の Anime Whisper の結果も捨てずに下へ回す
+      const prev = clip.text;
+      clip.text = clip.alt;
+      clip.alt = prev;
+      textInput.value = clip.text;
+      tr.querySelector('.alt .t').textContent = clip.alt;
+      tr.querySelector('.alt .who').textContent = tr.querySelector('.alt .who').textContent === 'Qwen3-ASR'
+        ? 'Anime Whisper' : 'Qwen3-ASR';
+    });
+  }
   tr.querySelector('input[type="checkbox"]').addEventListener('change', (e) => {
     clip.excluded = !e.target.checked;
     tr.classList.toggle('off', clip.excluded);
@@ -2347,6 +2667,7 @@ async function saveDataset() {
     dsTargetReset().classList.add('hidden');
     renderClipsTable();
     renderSources();
+    renderSourceSummary();
     await loadDatasets();
   } catch (err) {
     dsSaveStatus().textContent = `Save failed: ${err.message}`;
@@ -2432,10 +2753,29 @@ function setupDatasetTab() {
 
   dsProcessBtn().addEventListener('click', processSources);
   dsSaveBtn().addEventListener('click', saveDataset);
-  dsSkipSplit().addEventListener('change', (e) => {
-    dsVadControls().querySelectorAll('input[type="number"]').forEach(el => {
-      el.disabled = e.target.checked;
+
+  // 工程 2 の設定。変えたら覚えておき、次に開いたときもそのまま
+  loadDsOptions();
+  for (const [id] of Object.values(DS_OPTION_FIELDS)) {
+    document.getElementById(id).addEventListener('change', () => {
+      syncDsOptionState();
+      saveDsOptions();
     });
+  }
+  document.getElementById('ds-recommend-btn').addEventListener('click', recommendDsOptions);
+  document.getElementById('ds-reset-opts').addEventListener('click', () => {
+    applyDsOptions(DS_DEFAULTS);
+    saveDsOptions();
+    dsRecommendNote().textContent = '';
+  });
+  document.getElementById('ds-qwen-dl').addEventListener('click', downloadQwen);
+
+  // 工程 3：一括置き換えと、食い違いだけの表示
+  ['ds-rep-from', 'ds-rep-to'].forEach(id =>
+    document.getElementById(id).addEventListener('input', refreshReplaceCount));
+  document.getElementById('ds-rep-apply').addEventListener('click', applyReplacements);
+  document.getElementById('ds-diff-only').addEventListener('change', (e) => {
+    document.getElementById('ds-clips-table').classList.toggle('diff-only', e.target.checked);
   });
 
   dsTargetPick().addEventListener('click', async () => {

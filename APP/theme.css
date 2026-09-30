@@ -1027,6 +1027,27 @@ textarea, .glass-textarea { height:auto; padding:8px 10px; font-size:14px; line-
 .num-f input[type="number"] { width:66px; }
 .num-f .u { color:var(--faint); font-size:10.5px; }
 
+/* 工程 2 の詳細設定。書き起こしと、カット・分割を左右に分ける */
+.ds-more { margin-top:10px; }
+.ds-opt-grid { display:grid; grid-template-columns:repeat(auto-fit, minmax(300px, 1fr)); gap:14px 28px; }
+.ds-opt-grp { display:flex; flex-direction:column; gap:10px; min-width:0; }
+.ds-opt-hd { font-size:10px; letter-spacing:.14em; color:var(--gold); opacity:.85;
+  border-bottom:1px solid var(--gold-faint); padding-bottom:4px; }
+.ds-opt-grp .ds-opt-hd:not(:first-child) { margin-top:6px; }
+#ds-recommend-note:empty, #ds-qwen-state:empty { display:none; }
+
+/* 工程 3 の一括置き換え */
+.ds-replace { margin-bottom:10px; }
+.ds-replace #ds-rep-from { width:300px; }
+
+/* 両方で書き起こしたとき、2 つが食い違った行 */
+.clips tr.diff td.c-txt { box-shadow:inset 3px 0 0 var(--gold); }
+.clips .alt { display:flex; align-items:center; gap:8px; margin-top:4px; font-size:11px; color:var(--muted); }
+.clips .alt .who { color:var(--faint); font-size:10px; flex-shrink:0; }
+.clips .alt .t { flex:1; min-width:0; }
+.clips .alt button { flex-shrink:0; }
+.clips.diff-only tr:not(.diff) { display:none; }
+
 /* 工程 3 の表。行数が多いので密度を上げる */
 .clips { width:100%; border-collapse:collapse; font-size:12px; }
 .clips th {

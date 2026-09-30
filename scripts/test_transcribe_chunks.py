@@ -16,6 +16,8 @@ from server_audio import (  # noqa: E402
     CHUNK_MAX_SEC,
     _join_chunk_texts,
     _sound_chunks,
+    _tag_nonverbal,
+    _trim_silence,
 )
 
 SR = 16000
@@ -86,7 +88,40 @@ def test_join_adds_comma_only_between_unpunctuated() -> None:
     assert _join_chunk_texts(["", "えっと…", "", "その"]) == "えっと…その"
 
 
+def test_trim_keeps_margin_at_both_ends() -> None:
+    audio = np.concatenate([_silence(0.8), _tone(1.0), _silence(0.8)])
+    out = _trim_silence(audio, SR, floor_db=45.0, keep_sec=0.1, max_inner_sec=0.0)
+    assert abs(len(out) / SR - 1.2) < 0.03
+
+
+def test_trim_caps_inner_pause_only_when_asked() -> None:
+    audio = np.concatenate([_tone(1.0), _silence(2.0), _tone(1.0)])
+    kept = _trim_silence(audio, SR, floor_db=45.0, keep_sec=0.0, max_inner_sec=0.0)
+    capped = _trim_silence(audio, SR, floor_db=45.0, keep_sec=0.0, max_inner_sec=0.5)
+    assert abs(len(kept) / SR - 4.0) < 0.03
+    assert abs(len(capped) / SR - 2.5) < 0.03
+
+
+def test_trim_leaves_silent_clip_alone() -> None:
+    audio = _silence(1.0)
+    assert len(_trim_silence(audio, SR, 45.0, 0.1, 0.0)) == len(audio)
+
+
+def test_tags_sighs_laughs_humming() -> None:
+    assert _tag_nonverbal("ふぅ…") == "😮‍💨ふぅ…"
+    assert _tag_nonverbal("はい、ふふっ") == "はい、🤭ふふっ"
+    assert _tag_nonverbal("ふんふんふんふーん") == "🎵ふんふんふんふーん"
+    # 相槌の「ふんふん」、語の途中の「ふう」には付けない。二度かけても増えない
+    assert _tag_nonverbal("ふんふん") == "ふんふん"
+    assert _tag_nonverbal("工夫う") == "工夫う"
+    assert _tag_nonverbal(_tag_nonverbal("ふぅ…")) == "😮‍💨ふぅ…"
+
+
 if __name__ == "__main__":
+    test_trim_keeps_margin_at_both_ends()
+    test_trim_caps_inner_pause_only_when_asked()
+    test_trim_leaves_silent_clip_alone()
+    test_tags_sighs_laughs_humming()
     test_short_pause_stays_one_chunk()
     test_long_pause_splits()
     test_quiet_phrase_is_kept()

@@ -845,6 +845,7 @@
                 </div>
               </div>
               <div id="ds-sources" class="src-list"></div>
+              <div id="ds-src-sum" class="stats"></div>
             </div>
 
             <!-- 工程2：分割して書き起こす -->
@@ -853,16 +854,96 @@
                 <span class="step-no">2</span><span class="step-t">分割して書き起こす</span>
               </div>
               <div class="opt-row">
-                <label class="chk" title="1 ファイル＝1 セリフの素材（ゲーム音声など）のときに使う。無音検出を飛ばす。">
-                  <input type="checkbox" id="ds-skip-split"> 分割しない（1 ファイル＝1 クリップ）
-                </label>
+                <span class="num-f">切り方
+                  <select id="ds-split-method" title="1 ファイル＝1 セリフの素材（ゲーム音声など）は「分割しない」">
+                    <option value="vad">VAD で切る</option>
+                    <option value="level">音量で切る</option>
+                    <option value="none">分割しない（1 ファイル＝1 クリップ）</option>
+                  </select>
+                </span>
                 <span id="ds-vad-controls" class="opt-row">
-                  <span class="num-f">最短 <input type="number" id="ds-min-sec" value="3" step="0.5"><span class="u">秒</span></span>
-                  <span class="num-f">最長 <input type="number" id="ds-max-sec" value="20" step="1"><span class="u">秒</span></span>
+                  <span class="num-f">最短 <input type="number" id="ds-min-sec" value="3" step="0.5" min="0"><span class="u">秒</span></span>
+                  <span class="num-f">最長 <input type="number" id="ds-max-sec" value="20" step="1" min="1"><span class="u">秒</span></span>
                 </span>
                 <span class="sp"></span>
+                <button id="ds-recommend-btn" class="btn btn-ghost btn-sm" title="音源を測って、切り方と書き起こしの設定をおすすめの値にする">おすすめを入れる</button>
                 <button id="ds-process-btn" class="btn btn-primary btn-sm"><svg class="i i-sm"><use href="#ic-gen"/></svg>実行</button>
               </div>
+              <p id="ds-recommend-note" class="note"></p>
+
+              <details class="more ds-more">
+                <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>詳細設定</summary>
+                <div class="more-body ds-opt-grid">
+                  <div class="ds-opt-grp">
+                    <div class="ds-opt-hd">書き起こし</div>
+                    <div class="param-group">
+                      <label>モデル</label>
+                      <select id="ds-asr-model">
+                        <option value="anime-whisper">Anime Whisper（吐息・笑い・フィラーまで拾う）</option>
+                        <option value="qwen3-asr">Qwen3-ASR（固有名詞に強い。吐息・笑いは落とす）</option>
+                        <option value="both">両方で書き起こして、食い違いを見る</option>
+                      </select>
+                      <span id="ds-qwen-state" class="note"></span>
+                      <button id="ds-qwen-dl" class="btn btn-ghost btn-sm hidden">Qwen3-ASR を取得する</button>
+                    </div>
+                    <div class="param-group">
+                      <label>語彙のヒント <span class="en">Qwen3-ASR のみ</span></label>
+                      <input type="text" id="ds-vocab" placeholder="例: こはる、オーナー様、女将">
+                    </div>
+                    <div class="two">
+                      <div class="param-group">
+                        <label>区切る間 <span class="en">秒</span></label>
+                        <input type="number" id="ds-chunk-gap" value="0.6" step="0.1" min="0.1" max="5" title="これより長い間の前後は、別々に書き起こしてつなぐ">
+                      </div>
+                      <div class="param-group">
+                        <label>小声を拾う範囲 <span class="en">dB</span></label>
+                        <input type="number" id="ds-asr-floor" value="45" step="5" min="10" max="80" title="いちばん大きい音からこれだけ小さい音まで書き起こす">
+                      </div>
+                    </div>
+                    <div class="param-group">
+                      <label>繰り返しの抑制 <span class="en">no_repeat_ngram_size</span></label>
+                      <input type="number" id="ds-npr" value="0" step="1" min="0" max="20" title="0 = しない。同じ語を延々と繰り返すときだけ 4 前後に上げる">
+                    </div>
+                    <label class="chk"><input type="checkbox" id="ds-tag-nonverbal"> 溜息・笑い・鼻歌に絵文字タグを付ける（😮‍💨 🤭 🎵）</label>
+                  </div>
+
+                  <div class="ds-opt-grp">
+                    <div class="ds-opt-hd">前後の空白カット</div>
+                    <label class="chk"><input type="checkbox" id="ds-trim"> 各クリップの頭と尻の無音を切る</label>
+                    <div class="two">
+                      <div class="param-group">
+                        <label>残す余白 <span class="en">ミリ秒</span></label>
+                        <input type="number" id="ds-trim-keep" value="100" step="50" min="0">
+                      </div>
+                      <div class="param-group">
+                        <label>無音とみなす <span class="en">dB</span></label>
+                        <input type="number" id="ds-trim-floor" value="45" step="5" min="10" max="80" title="いちばん大きい音からこれだけ小さい音を無音とみなす">
+                      </div>
+                    </div>
+                    <div class="param-group">
+                      <label>中の間を縮める <span class="en">ミリ秒・0 = しない</span></label>
+                      <input type="number" id="ds-inner-cap" value="0" step="100" min="0" title="これより長い間を、この長さまで縮める。間も演技のうちなので既定はしない">
+                    </div>
+
+                    <div class="ds-opt-hd">分割</div>
+                    <div class="two">
+                      <div class="param-group">
+                        <label>区切りの無音 <span class="en">ミリ秒</span></label>
+                        <input type="number" id="ds-min-silence" value="500" step="100" min="0">
+                      </div>
+                      <div class="param-group">
+                        <label>前後の余白 <span class="en">ミリ秒</span></label>
+                        <input type="number" id="ds-speech-pad" value="400" step="50" min="0">
+                      </div>
+                    </div>
+                    <div class="param-group">
+                      <label>音量で切るときの基準 <span class="en">dB</span></label>
+                      <input type="number" id="ds-level-floor" value="45" step="5" min="10" max="80">
+                    </div>
+                    <button id="ds-reset-opts" class="btn btn-ghost btn-sm">既定に戻す</button>
+                  </div>
+                </div>
+              </details>
               <p id="ds-process-status" class="note"></p>
             </div>
 
@@ -871,11 +952,20 @@
               <div class="step-hd">
                 <span class="step-no">3</span><span class="step-t">確かめて直す</span>
                 <span class="step-note">書き起こしはその場で直せます</span>
+                <label class="chk" style="margin-left:12px;"><input type="checkbox" id="ds-diff-only"> 食い違いだけ表示</label>
                 <span class="num-f" style="margin-left:12px;">
                   <svg class="i i-sm"><use href="#ic-speaker"/></svg>
                   音量 <input type="range" id="ds-vol" min="0" max="100" step="5" value="100" style="width:88px;">
                   <span class="u" id="ds-vol-val">100</span>
                 </span>
+              </div>
+              <div class="opt-row ds-replace">
+                <span class="num-f">一括置き換え
+                  <input type="text" id="ds-rep-from" placeholder="置き換える語（、区切り）例: コハル、小春、古春">
+                  → <input type="text" id="ds-rep-to" placeholder="例: こはる" style="width:120px;">
+                </span>
+                <span id="ds-rep-count" class="note"></span>
+                <button id="ds-rep-apply" class="btn btn-ghost btn-sm" disabled>置き換える</button>
               </div>
               <table id="ds-clips-table" class="clips">
                 <thead>
