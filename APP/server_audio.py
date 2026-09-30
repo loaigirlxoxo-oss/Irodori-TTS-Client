@@ -308,7 +308,11 @@ def transcribe(req: TranscribeRequest) -> JSONResponse:
 # chunk on its own. A clip without a long pause stays one chunk, as before.
 CHUNK_FRAME_SEC = 0.01
 CHUNK_FLOOR_DB = 45.0      # below peak; low enough to keep quiet phrases and sighs
-CHUNK_ABS_FLOOR_DBFS = -70.0  # digital silence / hiss is never a chunk, however flat the file
+# Hiss below this is not a chunk when the file also has louder sound. A file
+# that is quiet throughout (low-gain recording) keeps the relative rule only,
+# so it is still transcribed; pure digital silence gives no chunk at all.
+CHUNK_ABS_FLOOR_DBFS = -70.0
+CHUNK_DIGITAL_SILENCE_DBFS = -120.0
 # Shorter pauses stay inside one chunk. Swept 0.35/0.5/0.6/0.8 s: 0.6 gave the
 # lowest CER on untouched clips (0.025), while 0.8 already missed dropped tails
 # again (CER 0.043 -> 0.092 on the clips that had lost their second sentence).
@@ -342,7 +346,12 @@ def _sound_chunks(audio_16k: np.ndarray, sr: int) -> list[tuple[float, float]]:
     levels = _frame_levels_db(audio_16k, sr)
     if levels.size == 0:
         return []
-    sounding = (levels > levels.max() - CHUNK_FLOOR_DB) & (levels > CHUNK_ABS_FLOOR_DBFS)
+    peak = float(levels.max())
+    if peak <= CHUNK_DIGITAL_SILENCE_DBFS:
+        return []
+    sounding = levels > peak - CHUNK_FLOOR_DB
+    if peak > CHUNK_ABS_FLOOR_DBFS:
+        sounding &= levels > CHUNK_ABS_FLOOR_DBFS
     runs: list[list[int]] = []
     start = None
     for i, on in enumerate(list(sounding) + [False]):

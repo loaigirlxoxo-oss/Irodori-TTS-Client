@@ -66,6 +66,20 @@ def test_silence_gives_no_chunk() -> None:
     assert _sound_chunks(_silence(2.0), SR) == []
 
 
+def test_quiet_recording_is_still_transcribed() -> None:
+    # 全体が小さい録音（ピーク約 -80dBFS）も、無音扱いで消さない
+    quiet = 10 ** (-77 / 20)
+    audio = np.concatenate([_tone(1.0, amp=quiet), _silence(1.0), _tone(1.0, amp=quiet)])
+    assert len(_sound_chunks(audio, SR)) == 2
+
+
+def test_hiss_next_to_speech_is_not_a_chunk() -> None:
+    # 声のあるファイルでは、-70dBFS 未満のノイズは塊にしない
+    hiss = (np.random.default_rng(0).standard_normal(int(2.0 * SR)) * 10 ** (-85 / 20)).astype(np.float32)
+    audio = np.concatenate([_tone(1.0), hiss])
+    assert len(_sound_chunks(audio, SR)) == 1
+
+
 def test_join_adds_comma_only_between_unpunctuated() -> None:
     assert _join_chunk_texts(["お待ちしておりました", "何なりと"]) == "お待ちしておりました、何なりと"
     assert _join_chunk_texts(["はい。", "どうぞ"]) == "はい。どうぞ"
@@ -79,5 +93,7 @@ if __name__ == "__main__":
     test_click_is_dropped()
     test_long_run_is_cut_under_encoder_window()
     test_silence_gives_no_chunk()
+    test_quiet_recording_is_still_transcribed()
+    test_hiss_next_to_speech_is_not_a_chunk()
     test_join_adds_comma_only_between_unpunctuated()
     print("OK")
