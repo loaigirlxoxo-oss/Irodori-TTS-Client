@@ -2166,7 +2166,7 @@ async function recommendDsOptions() {
     saveDsOptions();
     // 変わった項目が見えるように、畳んである詳細設定を開く
     document.getElementById('ds-more').open = true;
-    note.textContent = 'おすすめの値を入力しました。';
+    note.textContent = 'おすすめの値を入力しました。' + (rec.asr_warning ? ` ⚠ ${rec.asr_warning}。` : '');
   } catch (err) {
     note.textContent = `測れませんでした：${err.message}`;
   }
