@@ -2145,13 +2145,11 @@ async function recommendDsOptions() {
   try {
     let rec;
     let splitMethod = dsSplitMethod().value;
-    let splitReason = '切り方は音源を足してから測ります';
     let minSec = DS_RECOMMENDED.minSec;
     if (dsSourceFiles.length) {
       const p = await probeSources(true);
       rec = p.recommended;
       splitMethod = rec.method;
-      splitReason = rec.reason;
       if (rec.min_sec != null) minSec = rec.min_sec;
     } else {
       const res = await fetch(`${API_URL}/audio/asr_recommendation`);
@@ -2168,11 +2166,7 @@ async function recommendDsOptions() {
     saveDsOptions();
     // 変わった項目が見えるように、畳んである詳細設定を開く
     document.getElementById('ds-more').open = true;
-    const gpu = rec.gpu && rec.gpu.name ? `（${rec.gpu.name}）` : '';
-    note.textContent =
-      `おすすめの値を入れました。${splitReason}。${rec.asr_reason}${gpu}。` +
-      '前後の無音は 0.1 秒残して切り、溜息・笑いにはタグを付けます。' +
-      (rec.asr_warning ? ` ⚠ ${rec.asr_warning}。` : '');
+    note.textContent = 'おすすめの値を入力しました。';
   } catch (err) {
     note.textContent = `測れませんでした：${err.message}`;
   }
