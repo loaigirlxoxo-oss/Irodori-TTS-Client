@@ -460,6 +460,9 @@ PROBE_VAD_SAMPLE_SEC = 120.0
 ASR_VRAM_GB = {"anime-whisper": 1.9, "qwen3-asr": 4.3, "both": 5.9}
 # Room left for the CUDA context of other apps, the desktop and the TTS model.
 ASR_VRAM_MARGIN_GB = 2.0
+# Free VRAM already excludes what other apps hold now, so the free-memory
+# warning only adds a small buffer for allocator slack, not the 2 GB above.
+ASR_FREE_HEADROOM_GB = 0.5
 
 
 def _gpu_info() -> dict:
@@ -577,7 +580,7 @@ def _asr_recommendation() -> dict:
     gpu = _gpu_info()
     model, reason = _recommend_asr(gpu)
     warning = ""
-    need = ASR_VRAM_GB[model]
+    need = round(ASR_VRAM_GB[model] + ASR_FREE_HEADROOM_GB, 1)
     if gpu["free_gb"] is not None and gpu["free_gb"] < need:
         warning = (f"いま空いている VRAM は {gpu['free_gb']}GB で、書き起こしに約 {need}GB 要ります。"
                    "生成のモデルが載ったままなら、アプリを再起動してから始めると速く終わります")
