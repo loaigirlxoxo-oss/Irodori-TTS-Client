@@ -2131,24 +2131,36 @@ async function renderSourceSummary() {
   }
 }
 
+// 音源（切り方）と GPU（書き起こしのモデル）を測って、おすすめの値を入れる
 async function recommendDsOptions() {
   const note = dsRecommendNote();
-  if (dsSourceFiles.length === 0) {
-    applyDsOptions({ ...DS_RECOMMENDED, vocab: document.getElementById('ds-vocab').value });
-    note.textContent = 'おすすめの値を入れました。切り方は音源を足してから測ります。';
-    saveDsOptions();
-    return;
-  }
-  note.textContent = '音源を測っています…';
+  note.textContent = dsSourceFiles.length ? '音源と GPU を測っています…' : 'GPU を測っています…';
   try {
-    const p = await probeSources(true);
+    let rec;
+    let splitMethod = dsSplitMethod().value;
+    let splitReason = '切り方は音源を足してから測ります';
+    if (dsSourceFiles.length) {
+      const p = await probeSources(true);
+      rec = p.recommended;
+      splitMethod = rec.method;
+      splitReason = rec.reason;
+    } else {
+      const res = await fetch(`${API_URL}/audio/asr_recommendation`);
+      if (!res.ok) throw new Error(`status ${res.status}`);
+      rec = await res.json();
+    }
     applyDsOptions({
       ...DS_RECOMMENDED,
       vocab: document.getElementById('ds-vocab').value,
-      splitMethod: p.recommended.method,
+      splitMethod,
+      asrModel: rec.asr_model,
     });
-    note.textContent = `おすすめの値を入れました。${p.recommended.reason}。前後の無音は 0.1 秒残して切り、溜息・笑いにはタグを付けます。`;
     saveDsOptions();
+    const gpu = rec.gpu && rec.gpu.name ? `（${rec.gpu.name}）` : '';
+    note.textContent =
+      `おすすめの値を入れました。${splitReason}。${rec.asr_reason}${gpu}。` +
+      '前後の無音は 0.1 秒残して切り、溜息・笑いにはタグを付けます。' +
+      (rec.asr_warning ? ` ⚠ ${rec.asr_warning}。` : '');
   } catch (err) {
     note.textContent = `測れませんでした：${err.message}`;
   }

@@ -450,6 +450,58 @@ PROBE_VAD_COVERAGE_MIN = 0.7
 PROBE_VAD_SAMPLE_SEC = 120.0
 
 
+# Measured on RTX 5080 transcribing a 10.6 s clip (GPU-wide nvidia-smi delta):
+# anime-whisper 1.9 GB, Qwen3-ASR 4.3 GB, both loaded 5.9 GB.
+ASR_VRAM_GB = {"anime-whisper": 1.9, "qwen3-asr": 4.3, "both": 5.9}
+# Room left for the CUDA context of other apps, the desktop and the TTS model.
+ASR_VRAM_MARGIN_GB = 2.0
+
+
+def _gpu_info() -> dict:
+    """Card name, total VRAM, and VRAM free right now (None when unknown).
+
+    Free memory comes from nvidia-smi: torch.cuda.mem_get_info on Windows was
+    6.7 GB off from what the driver reports for the whole card.
+    """
+    info = {"cuda": False, "name": None, "total_gb": None, "free_gb": None}
+    try:
+        if not torch.cuda.is_available():
+            return info
+        props = torch.cuda.get_device_properties(0)
+        info.update(cuda=True, name=props.name, total_gb=round(props.total_memory / 1024 ** 3, 1))
+    except Exception:  # noqa: BLE001
+        return info
+    try:
+        import subprocess
+
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total,memory.used", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=10,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        ).stdout.splitlines()
+        total_mib, used_mib = (float(x) for x in out[0].split(","))
+        info["free_gb"] = round((total_mib - used_mib) / 1024, 1)
+    except Exception:  # noqa: BLE001 - not an NVIDIA card, or no nvidia-smi
+        pass
+    return info
+
+
+def _recommend_asr(gpu: dict) -> tuple[str, str]:
+    """Transcriber to recommend for this machine, with the reason shown to the user."""
+    if not gpu["cuda"]:
+        return "anime-whisper", "GPU が見つからないので Anime Whisper を CPU で使います（時間がかかります）"
+    need_both = ASR_VRAM_GB["both"] + ASR_VRAM_MARGIN_GB
+    ok, _ = _qwen_supported()
+    qwen_ready = ok and _qwen_local_snapshot() is not None
+    if gpu["total_gb"] >= need_both and qwen_ready:
+        return "both", (f"VRAM {gpu['total_gb']}GB に 2 つのモデル（約 {ASR_VRAM_GB['both']}GB）が載るので、"
+                        "両方で書き起こして食い違いを見ます")
+    if gpu["total_gb"] >= need_both and ok:
+        return "anime-whisper", (f"VRAM {gpu['total_gb']}GB なら、Qwen3-ASR を取得すると"
+                                 "「両方」で食い違いを見られます")
+    return "anime-whisper", f"VRAM {gpu['total_gb']}GB なので、Anime Whisper だけで書き起こします"
+
+
 def _vad_coverage(src: Path) -> Optional[float]:
     """Share of the loud audio that Silero calls speech, on the first 2 minutes."""
     from silero_vad import get_speech_timestamps  # imported lazily
@@ -502,8 +554,25 @@ def probe_sources(req: ProbeRequest) -> JSONResponse:
         "total_duration": round(total, 3),
         "median_duration": median,
         "vad_coverage": None if coverage is None else round(coverage, 3),
-        "recommended": {"method": method, "reason": why},
+        "recommended": {"method": method, "reason": why, **_asr_recommendation()},
     })
+
+
+def _asr_recommendation() -> dict:
+    gpu = _gpu_info()
+    model, reason = _recommend_asr(gpu)
+    warning = ""
+    need = ASR_VRAM_GB[model]
+    if gpu["free_gb"] is not None and gpu["free_gb"] < need:
+        warning = (f"いま空いている VRAM は {gpu['free_gb']}GB で、書き起こしに約 {need}GB 要ります。"
+                   "生成のモデルが載ったままなら、アプリを再起動してから始めると速く終わります")
+    return {"asr_model": model, "asr_reason": reason, "asr_warning": warning, "gpu": gpu}
+
+
+@router.get("/api/v1/audio/asr_recommendation")
+def asr_recommendation() -> JSONResponse:
+    """Recommended transcriber for this machine (GPU and VRAM based)."""
+    return JSONResponse(content=_asr_recommendation())
 
 
 class TranscribeRequest(BaseModel):
