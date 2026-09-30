@@ -164,12 +164,24 @@ def _qwen_supported() -> tuple[bool, str]:
     return True, ""
 
 
+# Files the processor and model read. Checked one by one: snapshot_download
+# with local_files_only also demands README.md etc., and online it creates
+# symlinks, which fail on Windows without developer mode (WinError 1314).
+QWEN_ASR_FILES = ("config.json", "model.safetensors", "processor_config.json",
+                  "tokenizer.json", "tokenizer_config.json", "chat_template.jinja",
+                  "generation_config.json")
+
+
 def _qwen_local_snapshot() -> Optional[str]:
-    from huggingface_hub import snapshot_download
+    """Directory holding every file Qwen3-ASR needs, or None if any is missing."""
+    from huggingface_hub import hf_hub_download
+    folder = None
     try:
-        return snapshot_download(QWEN_ASR_REPO, local_files_only=True)
+        for name in QWEN_ASR_FILES:
+            folder = str(Path(hf_hub_download(QWEN_ASR_REPO, name, local_files_only=True)).parent)
     except Exception:  # noqa: BLE001
         return None
+    return folder
 
 
 def _get_qwen_model():
@@ -196,12 +208,20 @@ def _get_qwen_model():
 
 
 def _download_qwen() -> None:
-    from huggingface_hub import snapshot_download
+    # Same path as setup (fetch_models): one file at a time, no symlinks, with
+    # its retries. The Hub dropped the connection (WinError 10054) several
+    # times in testing; a finished file is not fetched again.
+    from fetch_models import fetch_with_retry
+
     try:
-        snapshot_download(QWEN_ASR_REPO)
-        state = {"state": "done", "error": None}
+        fetch_with_retry(QWEN_ASR_REPO, None)
+        ok = _qwen_local_snapshot() is not None
+        state = ({"state": "done", "error": None} if ok else
+                 {"state": "error", "error": "取得したファイルが揃っていません。もう一度押してください"})
     except Exception as exc:  # noqa: BLE001
-        state = {"state": "error", "error": str(exc)}
+        print(f"[audio] qwen3-asr download failed: {exc}", flush=True)
+        state = {"state": "error",
+                 "error": "ネットワークから取得できませんでした。回線を確かめて、もう一度押してください"}
     with _qwen_download_lock:
         _qwen_download.update(state)
 
