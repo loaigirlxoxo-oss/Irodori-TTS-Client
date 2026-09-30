@@ -604,8 +604,7 @@ def _asr_recommendation() -> dict:
     warning = ""
     need = round(ASR_VRAM_GB[model] + ASR_FREE_HEADROOM_GB, 1)
     if gpu["free_gb"] is not None and gpu["free_gb"] < need:
-        warning = (f"いま空いている VRAM は {gpu['free_gb']}GB で、書き起こしに約 {need}GB 要ります。"
-                   "生成のモデルが載ったままなら、アプリを再起動してから始めると速く終わります")
+        warning = f"VRAMが不足しています。（必要容量: {need:g}GB）"
     return {"asr_model": model, "asr_reason": reason, "asr_warning": warning, "gpu": gpu}
 
 
