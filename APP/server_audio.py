@@ -877,6 +877,15 @@ def _transcribe_whole_then_tail(run, audio_16k: np.ndarray, sr: int, spans: list
     cost context on single-line clips. Here the whole clip is read in one
     pass; then, walking the sounding chunks from the end, each chunk whose own
     transcript is not found in the whole text is added back, until one is.
+    Two choices were measured on 3834 clips (22 voices with the game script,
+    Koharu, 34 speakers): stopping at the first covered chunk beats checking
+    every chunk (a middle chunk missing with the tail present: 29 clips;
+    checking all and falling back to chunks: plain 3.24 -> 3.15% but Koharu
+    3.38 -> 3.61%, and every chunk transcribed each time), and "contained"
+    at half the letters beats stricter cut-offs (0.7 / 0.8 / 1.0 made every
+    set worse, e.g. plain lines 3.24 -> 3.33 / 3.54 / 5.89%): spelling
+    differences then look like missing speech and lines get added twice.
+
     Short chunks get no special case: skipping one-letter chunks only ever
     changed 8 Koharu clips (dropping one 手 but also real replies like よ) and
     no clip of the 34 other voices, so it was a rule fitted to one clip.
