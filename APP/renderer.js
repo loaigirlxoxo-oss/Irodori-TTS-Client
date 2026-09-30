@@ -2139,11 +2139,13 @@ async function recommendDsOptions() {
     let rec;
     let splitMethod = dsSplitMethod().value;
     let splitReason = '切り方は音源を足してから測ります';
+    let minSec = DS_RECOMMENDED.minSec;
     if (dsSourceFiles.length) {
       const p = await probeSources(true);
       rec = p.recommended;
       splitMethod = rec.method;
       splitReason = rec.reason;
+      if (rec.min_sec != null) minSec = rec.min_sec;
     } else {
       const res = await fetch(`${API_URL}/audio/asr_recommendation`);
       if (!res.ok) throw new Error(`status ${res.status}`);
@@ -2153,6 +2155,7 @@ async function recommendDsOptions() {
       ...DS_RECOMMENDED,
       vocab: document.getElementById('ds-vocab').value,
       splitMethod,
+      minSec,
       asrModel: rec.asr_model,
     });
     saveDsOptions();

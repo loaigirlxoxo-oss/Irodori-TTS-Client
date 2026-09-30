@@ -444,6 +444,11 @@ class ProbeRequest(BaseModel):
 # One line per file (game voice sets) is recognised by length: with several
 # files and a median at or under this, splitting would only cut lines apart.
 PROBE_PER_FILE_MEDIAN_SEC = 15.0
+# ...and only when no file is long: a single long recording among short lines
+# would otherwise be kept whole (an hour-long clip is useless for training).
+PROBE_PER_FILE_MAX_SEC = 30.0
+# When long recordings are split next to short lines, keep lines this short.
+PROBE_MIXED_MIN_SEC = 1.0
 # Silero coverage of the loud parts below this means it is missing speech
 # (it caught about half of one anime voice we measured), so cut by level.
 PROBE_VAD_COVERAGE_MIN = 0.7
@@ -537,9 +542,15 @@ def probe_sources(req: ProbeRequest) -> JSONResponse:
         return JSONResponse(content={"files": files, "unreadable": bad,
                                      "total_duration": round(total, 3), "median_duration": median})
     coverage = None
-    if len(files) >= 2 and median <= PROBE_PER_FILE_MEDIAN_SEC:
+    longest_sec = durations[-1]
+    per_file = len(files) >= 2 and median <= PROBE_PER_FILE_MEDIAN_SEC
+    min_sec = None
+    if per_file and longest_sec <= PROBE_PER_FILE_MAX_SEC:
         method, why = "none", f"{len(files)} 本の音声が短い（中央値 {median:.1f} 秒）ので、1ファイル＝1クリップ"
     else:
+        if per_file:
+            # Short lines mixed with long recordings: split, but keep short lines.
+            min_sec = PROBE_MIXED_MIN_SEC
         # Measure the longest file; that is where splitting matters.
         longest = max(files, key=lambda f: f["duration"])
         coverage = _vad_coverage(Path(longest["path"]))
@@ -548,13 +559,17 @@ def probe_sources(req: ProbeRequest) -> JSONResponse:
         else:
             shown = "測れず" if coverage is None else f"{coverage:.0%}"
             method, why = "vad", f"VAD が声を拾えている（{shown}）ので、VAD で切る"
+        if min_sec is not None:
+            length = f"{longest_sec:.0f} 秒" if longest_sec < 120 else f"{longest_sec / 60:.0f} 分"
+            why += (f"。{length}の長い音源が混ざっているので分割し、"
+                    f"短い台詞が消えないよう最短を {min_sec:g} 秒にする")
     return JSONResponse(content={
         "files": files,
         "unreadable": bad,
         "total_duration": round(total, 3),
         "median_duration": median,
         "vad_coverage": None if coverage is None else round(coverage, 3),
-        "recommended": {"method": method, "reason": why, **_asr_recommendation()},
+        "recommended": {"method": method, "reason": why, "min_sec": min_sec, **_asr_recommendation()},
     })
 
 
