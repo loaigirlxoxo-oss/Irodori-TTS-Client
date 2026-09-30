@@ -12,11 +12,16 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "APP"))
 
+import torch  # noqa: E402
+
 from server_audio import (  # noqa: E402
     CHUNK_MAX_SEC,
+    _contained,
     _join_chunk_texts,
+    _RewindEscape,
     _sound_chunks,
     _tag_nonverbal,
+    _transcribe_whole_then_tail,
     _trim_silence,
 )
 
@@ -117,7 +122,67 @@ def test_tags_sighs_laughs_humming() -> None:
     assert _tag_nonverbal(_tag_nonverbal("ふぅ…")) == "😮‍💨ふぅ…"
 
 
+def _fake_run(by_length: dict):
+    """書き起こしの代わり。渡された音声の長さに一番近い鍵（秒）の文を返す。"""
+    return lambda piece: by_length[min(by_length, key=lambda k: abs(k - len(piece) / SR))]
+
+
+def test_whole_clip_kept_when_it_covers_everything() -> None:
+    audio = np.concatenate([_tone(1.5), _silence(0.9), _tone(2.0)])
+    spans = _sound_chunks(audio, SR)
+    run = _fake_run({4.4: "お待ちしておりました。何なりとお申し付けください", 2.1: "何なりとお申し付けください"})
+    segs = _transcribe_whole_then_tail(run, audio, SR, spans)
+    assert [s["text"] for s in segs] == ["お待ちしておりました。何なりとお申し付けください"]
+
+
+def test_dropped_second_sentence_is_added_back() -> None:
+    # 丸ごとだと 1 文目で止まる（anime-whisper の癖）。2 つ目の塊だけ足す
+    audio = np.concatenate([_tone(1.5), _silence(0.9), _tone(2.0)])
+    spans = _sound_chunks(audio, SR)
+    run = _fake_run({4.4: "お待ちしておりました", 2.1: "コハルに、何なりとお申し付けください", 1.6: "お待ちしておりました"})
+    text = _join_chunk_texts([s["text"] for s in _transcribe_whole_then_tail(run, audio, SR, spans)])
+    assert text == "お待ちしておりました、コハルに、何なりとお申し付けください"
+
+
+def test_short_reply_after_a_pause_is_added() -> None:
+    # 間のあとの短い返事（「え?」）も、丸ごとの書き起こしに無ければ足す
+    audio = np.concatenate([_tone(1.5), _silence(1.0), _tone(0.3)])
+    spans = _sound_chunks(audio, SR)
+    run = _fake_run({2.8: "オーナー様", 0.4: "え?", 1.6: "オーナー様"})
+    text = _join_chunk_texts([s["text"] for s in _transcribe_whole_then_tail(run, audio, SR, spans)])
+    assert text == "オーナー様、え?"
+
+
+def test_chunk_with_nothing_read_is_skipped() -> None:
+    audio = np.concatenate([_tone(1.5), _silence(1.0), _tone(0.3)])
+    spans = _sound_chunks(audio, SR)
+    run = _fake_run({2.8: "オーナー様", 0.4: "…", 1.6: "オーナー様"})
+    assert [s["text"] for s in _transcribe_whole_then_tail(run, audio, SR, spans)] == ["オーナー様"]
+
+
+def test_contained_ignores_spelling() -> None:
+    assert _contained("コハルに", "こはるに、何なりと")
+    assert not _contained("何なりとお申し付けください", "お待ちしておりました")
+
+
+def test_rewind_escape_bans_the_ninth_repeat() -> None:
+    proc = _RewindEscape()
+    prompt = [1, 2, 3, 4]
+    scores = torch.zeros(1, 10)
+    proc(torch.tensor([prompt]), scores.clone())  # first call fixes the prompt length
+    looped = proc(torch.tensor([prompt + [7] * 8]), scores.clone())
+    assert looped[0, 7] == -float("inf")
+    fine = proc(torch.tensor([prompt + [7] * 7]), scores.clone())
+    assert fine[0, 7] == 0
+
+
 if __name__ == "__main__":
+    test_whole_clip_kept_when_it_covers_everything()
+    test_dropped_second_sentence_is_added_back()
+    test_short_reply_after_a_pause_is_added()
+    test_chunk_with_nothing_read_is_skipped()
+    test_contained_ignores_spelling()
+    test_rewind_escape_bans_the_ninth_repeat()
     test_trim_keeps_margin_at_both_ends()
     test_trim_caps_inner_pause_only_when_asked()
     test_trim_leaves_silent_clip_alone()

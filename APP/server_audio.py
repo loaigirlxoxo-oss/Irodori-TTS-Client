@@ -7,9 +7,11 @@ to avoid per-request startup cost.
 """
 from __future__ import annotations
 
+import difflib
 import re
 import sys
 import threading
+import unicodedata
 import uuid
 from pathlib import Path
 from typing import Optional
@@ -772,7 +774,44 @@ def _tag_nonverbal(text: str) -> str:
 ASR_MODELS = ("anime-whisper", "qwen3-asr")
 
 
+class _RewindEscape:
+    """Stop a repetition loop without cutting the line (CrisperWhisper 2.0 idea).
+
+    When the same n-gram of tokens has just repeated LIMITS[n] times, the
+    token that would start one more repeat is banned for this step, so the
+    decoder moves on to the rest of the line instead of writing る until the
+    448-token limit. Genuine repeats up to the limit are kept.
+    Measured on 1360 real clips of 34 speakers: runaway transcripts 10 -> 0;
+    on 1154 lines with the game script as reference, CER of moan-heavy lines
+    28.9% -> 26.0% while plain lines did not change.
+    """
+
+    LIMITS = {1: 8, 2: 8, 3: 4, 4: 4}
+
+    def __init__(self):
+        self.prompt_len = None
+
+    def __call__(self, input_ids, scores):
+        if self.prompt_len is None:  # first step: only the forced prompt is there
+            self.prompt_len = input_ids.shape[1]
+        for b in range(input_ids.shape[0]):
+            gen = input_ids[b, self.prompt_len:].tolist()
+            for n, limit in self.LIMITS.items():
+                if len(gen) < n * limit:
+                    continue
+                unit = gen[-n:]
+                reps, pos = 1, len(gen) - n
+                while pos - n >= 0 and gen[pos - n:pos] == unit:
+                    reps += 1
+                    pos -= n
+                if reps >= limit:
+                    scores[b, unit[0]] = -float("inf")
+        return scores
+
+
 def _whisper_runner(req: "TranscribeRequest"):
+    from transformers import LogitsProcessorList
+
     state = _get_whisper_model()
     processor, model = state["processor"], state["model"]
 
@@ -786,6 +825,7 @@ def _whisper_runner(req: "TranscribeRequest"):
                 task="transcribe",
                 no_repeat_ngram_size=int(req.no_repeat_ngram_size),
                 repetition_penalty=float(req.repetition_penalty),
+                logits_processor=LogitsProcessorList([_RewindEscape()]),
             )
         return processor.batch_decode(predicted_ids, skip_special_tokens=True)[0].strip()
 
@@ -811,6 +851,59 @@ def _qwen_runner(req: "TranscribeRequest"):
     return run
 
 
+def _plain_letters(s: str) -> str:
+    """Letters and digits only, katakana as hiragana: for comparing transcripts."""
+    s = unicodedata.normalize("NFKC", s or "")
+    s = "".join(chr(ord(c) - 0x60) if "ァ" <= c <= "ヶ" else c for c in s)
+    return "".join(c for c in s if unicodedata.category(c)[0] in "LN")
+
+
+def _contained(part: str, whole: str) -> bool:
+    """Is most of part's text (>= half its letters) found in whole, in order?"""
+    p, w = _plain_letters(part), _plain_letters(whole)
+    blocks = difflib.SequenceMatcher(None, p, w, autojunk=False).get_matching_blocks()
+    return sum(b.size for b in blocks) / max(1, len(p)) >= 0.5
+
+
+def _segment(start: float, end: float, text: str) -> dict:
+    return {"start": round(start, 3), "end": round(end, 3), "text": text}
+
+
+def _transcribe_whole_then_tail(run, audio_16k: np.ndarray, sr: int, spans: list) -> list[dict]:
+    """Anime Whisper: the whole clip first, then add back what it left out.
+
+    anime-whisper stops at a long pause and drops the rest (one line per file
+    in its training data). Cutting every clip at pauses (1.2.1) fixed that but
+    cost context on single-line clips. Here the whole clip is read in one
+    pass; then, walking the sounding chunks from the end, each chunk whose own
+    transcript is not found in the whole text is added back, until one is.
+    Short chunks get no special case: skipping one-letter chunks only ever
+    changed 8 Koharu clips (dropping one 手 but also real replies like よ) and
+    no clip of the 34 other voices, so it was a rule fitted to one clip.
+
+    Measured against the game script on 1320 real lines of 22 voices and on
+    1154 twice-corrected Koharu lines:
+      plain lines CER   1.2.0 3.22%   1.2.1 3.42%   this 3.24%
+      Koharu CER        1.2.0 9.61%   1.2.1 4.64%   this 3.38% (exact 78.8 / 81.4 / 87.9%)
+    """
+    duration = len(audio_16k) / sr
+    whole = run(audio_16k)
+    segments = [_segment(0.0, duration, whole)]
+    if len(spans) <= 1:
+        return segments
+    tail = []
+    for start, end in reversed(spans):
+        a = int(max(0.0, start - CHUNK_PAD_SEC) * sr)
+        b = int(min(duration, end + CHUNK_PAD_SEC) * sr)
+        text = run(audio_16k[a:b])
+        if not _plain_letters(text):
+            continue  # nothing was read in this chunk
+        if _contained(text, whole):
+            break
+        tail.insert(0, _segment(start, end, text))
+    return segments + tail
+
+
 def _transcribe_inner(req: "TranscribeRequest", src) -> JSONResponse:
     if req.model not in ASR_MODELS:
         raise HTTPException(400, f"model must be one of {ASR_MODELS}")
@@ -823,17 +916,21 @@ def _transcribe_inner(req: "TranscribeRequest", src) -> JSONResponse:
     audio_16k, sr = _load_audio_for_pipeline(src)
     duration_sec = float(len(audio_16k)) / float(sr)
     spans = _sound_chunks(audio_16k, sr, floor_db=req.floor_db, join_gap_sec=req.chunk_gap_sec)
-    # Qwen3-ASR does not stop at pauses (it returned second sentences
-    # anime-whisper dropped), and a lone word chunk loses the context it needs
-    # for names. Give it the whole sounding span when it fits one window.
-    if req.model == "qwen3-asr" and spans and spans[-1][1] - spans[0][0] <= CHUNK_MAX_SEC:
-        spans = [(spans[0][0], spans[-1][1])]
 
-    segments = []
-    for start, end in spans:
-        a = int(max(0.0, start - CHUNK_PAD_SEC) * sr)
-        b = int(min(duration_sec, end + CHUNK_PAD_SEC) * sr)
-        segments.append({"start": round(start, 3), "end": round(end, 3), "text": run(audio_16k[a:b])})
+    if req.model == "anime-whisper" and spans and duration_sec <= CHUNK_MAX_SEC:
+        segments = _transcribe_whole_then_tail(run, audio_16k, sr, spans)
+    else:
+        # Longer than one 30 s window (or Qwen3-ASR): chunk by pauses.
+        # Qwen3-ASR does not stop at pauses (it returned second sentences
+        # anime-whisper dropped), and a lone word chunk loses the context it
+        # needs for names, so it gets the whole sounding span when that fits.
+        if req.model == "qwen3-asr" and spans and spans[-1][1] - spans[0][0] <= CHUNK_MAX_SEC:
+            spans = [(spans[0][0], spans[-1][1])]
+        segments = []
+        for start, end in spans:
+            a = int(max(0.0, start - CHUNK_PAD_SEC) * sr)
+            b = int(min(duration_sec, end + CHUNK_PAD_SEC) * sr)
+            segments.append(_segment(start, end, run(audio_16k[a:b])))
 
     text = _join_chunk_texts([s["text"] for s in segments])
     if req.tag_nonverbal:
