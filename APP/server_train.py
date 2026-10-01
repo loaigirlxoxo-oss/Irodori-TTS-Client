@@ -1126,9 +1126,12 @@ def _evaluate_job(job_id: str, params: dict) -> None:
     clip, as the easy tab does for a folder. Every checkpoint is measured and
     shown; the recommendation follows pick_checkpoint, which only considers
     the last 40% of the run.
+
+    The recommendation here is pick_by_score over every checkpoint (similarity
+    and misreads combined); the easy tab keeps pick_checkpoint.
     """
     import server_easy
-    from easy_eval import pick_checkpoint
+    from easy_eval import combined_score, pick_by_score
 
     clips = sorted(get_dataset_dir(params["dataset"]).joinpath("clips").glob("*.wav"))
     if not clips:
@@ -1147,7 +1150,9 @@ def _evaluate_job(job_id: str, params: dict) -> None:
     stopped = _was_stop_requested(job_id)
     result = {"state": "stopped" if stopped else "done", "rows": rows, "ref": ref}
     if rows:
-        picked = pick_checkpoint(rows, int(params["max_steps"]))
+        for r in rows:
+            r["score"] = combined_score(r)
+        picked = pick_by_score(rows)
         result.update(picked=picked["name"], fallback=picked["fallback"])
     _update_status(job_id, evaluation=result)
 

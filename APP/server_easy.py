@@ -81,7 +81,7 @@ def _foreign_chars(text: str) -> list[str]:
     return out
 
 
-def load_lines(path: str | Path | None = None) -> list[tuple[str, str]]:
+def load_lines(path: str | Path | None = None, min_len: int = MIN_LEN) -> list[tuple[str, str]]:
     """(タグ, 本文) の列を返す。壊れていれば LineError。
 
     `## ` で始まる行は見出し、`#` で始まる行と空行は無視する。それ以外は
@@ -110,9 +110,9 @@ def load_lines(path: str | Path | None = None) -> list[tuple[str, str]]:
 
         tag, body = matched.group(1), matched.group(2).strip()
 
-        if not MIN_LEN <= len(body) <= MAX_LEN:
+        if not min_len <= len(body) <= MAX_LEN:
             raise LineError(
-                f"{len(body)}字で範囲外（{MIN_LEN}〜{MAX_LEN}字）: {body[:30]}"
+                f"{len(body)}字で範囲外（{min_len}〜{MAX_LEN}字）: {body[:30]}"
             )
 
         # 「だ い じ ょ う ぶ」のような表記は変に鳴る（実機確認済み）。
@@ -125,13 +125,18 @@ def load_lines(path: str | Path | None = None) -> list[tuple[str, str]]:
     return out
 
 
+# 評価文は短文も測る（驚き・怒りなどの一言）。学習文の下限 MIN_LEN は
+# 生成素材の品質のためのもので、評価には当てはめない。
+EVAL_MIN_LEN = 8
+
+
 def load_eval_lines(path: str | Path | None = None) -> list[tuple[str, str]]:
-    """採用の判断に使う10本。
+    """採用の判断に使う評価文（短文から長文、表現を変えて14本）。
 
     学習に使った402本とは別に持つ。学習した文で評価すると、覚えた文を
     読ませることになって有利に出るため。
     """
-    return load_lines(path or EVAL_FILE)
+    return load_lines(path or EVAL_FILE, min_len=EVAL_MIN_LEN)
 
 
 # === 生成ジョブ ===
@@ -317,12 +322,14 @@ def _resolve_wav(path_or_url: str) -> Path:
 
 
 def _synthesize_one(text: str, ref_wav: str, model_type: str,
-                    lora: str | None = None) -> str:
+                    lora: str | None = None, seed: int | None = None) -> str:
     """1本合成して、出力 wav の絶対パスを返す。"""
     payload: dict = {"text": text, "model_type": model_type, "ref_wav": ref_wav,
                      "easy_token": INTERNAL_TOKEN}
     if lora:
         payload["lora_name"] = lora
+    if seed is not None:
+        payload["seed"] = seed
     body = json.dumps(payload).encode("utf-8")
     req = urllib.request.Request(
         _api_base() + "/synthesize/",
@@ -1194,7 +1201,8 @@ def _measure(targets, eval_lines, job_id: str, ref_wav: str, base: str,
              made_wavs: list[str], save, should_stop=None) -> list[dict]:
     """チェックポイントを1つずつ鳴らして SIM と CER を測る。"""
     from easy_eval import (
-        cer, release_eval_models, release_runtime, speaker_similarity, transcribe,
+        SIM_MIN_CHARS, eval_seed, release_eval_models, release_runtime, score_lines,
+        speaker_similarity, transcribe,
     )
 
     rows: list[dict] = []
@@ -1213,20 +1221,21 @@ def _measure(targets, eval_lines, job_id: str, ref_wav: str, base: str,
         # 鳴らすのと測るのを混ぜない。1本ごとに行き来すると、合成のランタイムと
         # ECAPA・書き起こしが同時に載って 13.5GB まで伸びた（実測）。
         # まとめて鳴らしてから合成を返し、それから測る。
-        wavs = [(_synthesize_one(f"{tag} {body}", ref_wav, base, lora=preview), body)
-                for tag, body in eval_lines]
-        made_wavs.extend(w for w, _ in wavs)
+        # 乱数は本ごとに固定し、どのチェックポイントにも同じ値を渡す。
+        wavs = [(_synthesize_one(f"{tag} {body}", ref_wav, base, lora=preview, seed=eval_seed(i)), tag, body)
+                for i, (tag, body) in enumerate(eval_lines)]
+        made_wavs.extend(w for w, _, _ in wavs)
         if not release_runtime():
             raise RuntimeError(
                 "他の生成が続いていて、いまは採用の判定に移れません。"
                 "生成タブの処理が終わってからやり直してください。"
             )
 
-        sims, cers = [], []
+        results = []
         try:
-            for wav, body in wavs:
-                sims.append(speaker_similarity(ref_wav, wav))
-                cers.append(cer(body, transcribe(wav)))
+            for wav, tag, body in wavs:
+                sim = speaker_similarity(ref_wav, wav) if len(body) >= SIM_MIN_CHARS else None
+                results.append({"tag": tag, "body": body, "heard": transcribe(wav), "sim": sim})
         finally:
             # 次のチェックポイントを鳴らす前に返す。抱えたままだと合成と
             # 同時に載って 13.5GB まで伸びる（実測）。読み直しはキャッシュ
@@ -1236,8 +1245,7 @@ def _measure(targets, eval_lines, job_id: str, ref_wav: str, base: str,
         rows.append({
             "name": name,
             "step": step,
-            "sim": sum(sims) / len(sims),
-            "cer": sum(cers) / len(cers),
+            **dict(zip(("sim", "cer"), score_lines(results))),
         })
         status["evaluated"] = rows
         save(status)

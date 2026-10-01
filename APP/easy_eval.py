@@ -269,6 +269,67 @@ SIM_BAND = 0.02
 MIN_PROGRESS = 0.60
 
 
+# 評価文の測り方（presets/easy_eval_lines.txt の頭書きと揃える）。
+# 喘ぎは書き起こしが当てにならない（実在作品の台本と照合して CER 26〜29%）ので
+# 読み間違いに入れない。声の似ている度には入れる。
+NONVERBAL_TAGS = ("🥵", "🌬️")
+# これより短い本は声の特徴が安定しないので、似ている度に入れない。
+SIM_MIN_CHARS = 20
+# 合成の乱数。本ごとに決めて、どのチェックポイントにも同じ値を渡す。
+# 乱数が毎回変わると、同じチェックポイントでも長い文がたまたま崩れるかで
+# 読み間違いが 7% と 33% に分かれた（実測）。
+EVAL_SEED_BASE = 1234
+
+
+def eval_seed(index: int) -> int:
+    return EVAL_SEED_BASE + index
+
+
+def score_lines(results: list[dict]) -> tuple[float, float]:
+    """1チェックポイント分の (似ている度, 読み間違い) を出す。
+
+    results は本ごとの {"tag", "body", "heard", "sim"}（sim は測らなかった本では None）。
+    読み間違いは間違えた字数の合計 / 全体の字数。本ごとの平均にすると、短い本の
+    1字違いが 20% になって振れ、長い本の大崩れ（文の後に声が続いて 261%）が平均を
+    支配する。1本の間違いはその本の字数で頭打ちにする。
+    """
+    errors = chars = 0
+    sims = []
+    for r in results:
+        if r.get("sim") is not None:
+            sims.append(r["sim"])
+        if r["tag"] in NONVERBAL_TAGS:
+            continue
+        n = len(_normalize(r["body"]))
+        errors += min(cer(r["body"], r["heard"]) * n, n)
+        chars += n
+    sim = sum(sims) / len(sims) if sims else 0.0
+    return sim, (errors / chars if chars else 0.0)
+
+
+# 似ている度と読み間違いを合わせた点数の、読み間違いの重み。チェックポイント間の
+# 似ている度の差は全体でも 0.023 しかなかった（実測）ので、0.5 にすると読み間違いが
+# 5 ポイント違えば似ている度の差を全部ひっくり返す。大差なら読み間違い、同程度なら
+# 似ている度で決まる。
+CER_WEIGHT = 0.5
+
+
+def combined_score(row: dict) -> float:
+    return row["sim"] - CER_WEIGHT * row["cer"]
+
+
+def pick_by_score(rows: list[dict]) -> dict:
+    """学習タブのおすすめ。全チェックポイントから合わせた点数が最も高いもの。
+
+    同点なら学習が進んだほう。前半だけを外す規則（pick_checkpoint）は使わない。
+    学習を通して一番良かったのが前半ということがある（コハルは 1300 中 500）。
+    """
+    if not rows:
+        raise ValueError("評価できるチェックポイントがありません")
+    best = max(rows, key=lambda r: (combined_score(r), r["step"]))
+    return dict(best, score=combined_score(best), fallback=False)
+
+
 def pick_checkpoint(rows: list[dict], max_steps: int) -> dict:
     """採用するチェックポイントを決める。
 

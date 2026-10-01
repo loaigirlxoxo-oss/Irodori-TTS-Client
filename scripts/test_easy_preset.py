@@ -72,16 +72,20 @@ def test_rejects_wide_space_spelling() -> None:
 
 
 def test_eval_lines_count_and_spread() -> None:
-    """評価文は10本。長さを3階層に散らす。"""
+    """評価文は14本。短文から長文まで散らし、表現は1本ずつ変える。喘ぎも入れる。"""
     rows = load_eval_lines()
-    assert len(rows) == 10, f"10本のはずが {len(rows)} 本"
-    lens = sorted(len(body) for _, body in rows)
-    short = [n for n in lens if n < 60]
-    mid = [n for n in lens if 60 <= n < 120]
-    long_ = [n for n in lens if n >= 120]
-    assert (len(short), len(mid), len(long_)) == (3, 4, 3), (
+    assert len(rows) == 14, f"14本のはずが {len(rows)} 本"
+    lens = [len(body) for tag, body in rows if tag not in ("🥵", "🌬️")]
+    short = [n for n in lens if n < 20]
+    mid = [n for n in lens if 20 <= n < 60]
+    long_ = [n for n in lens if n >= 60]
+    assert (len(short), len(mid), len(long_)) == (4, 5, 3), (
         f"配分が違う 短{len(short)} 中{len(mid)} 長{len(long_)}: {lens}"
     )
+    assert max(lens) <= 100, f"長すぎる本がある: {max(lens)}字"
+    tags = [tag for tag, _ in rows]
+    assert len(set(tags)) == len(tags), f"表現が重複している: {tags}"
+    assert "🥵" in tags, "喘ぎが無い"
 
 
 def test_eval_lines_differ_from_train() -> None:
