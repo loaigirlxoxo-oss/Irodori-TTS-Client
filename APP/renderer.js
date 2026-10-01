@@ -1994,8 +1994,6 @@ const DS_DEFAULTS = {
 // 伸ばすだけなので切る（0.1 秒は残す）。中の間は演技なので縮めない。
 const DS_RECOMMENDED = { ...DS_DEFAULTS, trim: true };
 const DS_OPTIONS_KEY = 'ds-options-v1';
-// これより長い音源を「分割しない」で流す前に確かめる（学習の1本は長くても20秒前後）
-const DS_LONG_SOURCE_SEC = 60;
 
 function readDsOptions() {
   const out = {};
@@ -2114,7 +2112,7 @@ async function probeSources(recommend) {
   return res.json();
 }
 
-// 音源ごとの長さ（秒）。分割しないで長い音源を流す前の確認に使う
+// 音源ごとの長さ（秒）。分割中の表示に使う
 let dsSourceDurations = {};
 
 async function renderSourceSummary() {
@@ -2285,15 +2283,9 @@ async function processSources() {
     alert('最長は最短より長くしてください。');
     return;
   }
-  if (o.splitMethod === 'none') {
-    // 1 本が長い音源を分割しないで流すと、学習に使えない長いクリップが1本できるだけ
-    const long = dsSourceFiles.filter(s => (dsSourceDurations[s.path] || 0) > DS_LONG_SOURCE_SEC);
-    if (long.length) {
-      const names = long.slice(0, 3).map(s => `${s.name}（${formatDuration(dsSourceDurations[s.path])}）`).join('、');
-      const more = long.length > 3 ? ` ほか ${long.length - 3} 本` : '';
-      if (!confirm(`切り方が「分割しない」ですが、長い音源があります：${names}${more}。\n` +
-                   `このままだと、それぞれが1本のクリップになります。このまま実行しますか？`)) return;
-    }
+  if (!(o.maxSec <= 30)) {
+    alert('最長は 30 秒までにしてください。元のモデルが 30 秒までしか扱わないためです。');
+    return;
   }
   const models = o.asrModel === 'both' ? ['anime-whisper', 'qwen3-asr'] : [o.asrModel];
   if (models.includes('qwen3-asr')) {
@@ -2313,8 +2305,9 @@ async function processSources() {
       const src = dsSourceFiles[i];
 
       let chunkList;
-      if (o.splitMethod === 'none' && !o.trim) {
-        // 1 ファイル＝1 クリップで加工もしないなら、元のファイルをそのまま使う
+      if (o.splitMethod === 'none' && !o.trim && (dsSourceDurations[src.path] || Infinity) <= 30) {
+        // 1 ファイル＝1 クリップで加工もしないなら、元のファイルをそのまま使う。
+        // 30 秒を超える（または長さが分からない）ファイルはサーバーで切らせる
         status.textContent = `読み込み (${i + 1}/${dsSourceFiles.length}): ${src.name}`;
         chunkList = [{ path: src.path, duration: null, raw_duration: null }];
       } else {

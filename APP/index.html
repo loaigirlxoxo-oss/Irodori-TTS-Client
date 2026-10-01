@@ -858,12 +858,12 @@
                   <select id="ds-split-method" title="1 ファイル＝1 セリフの素材（ゲーム音声など）は「分割しない」">
                     <option value="vad">VAD で切る</option>
                     <option value="level">音量で切る</option>
-                    <option value="none">分割しない（1 ファイル＝1 クリップ）</option>
+                    <option value="none">分割しない（1 ファイル＝1 クリップ。30 秒を超える分は切る）</option>
                   </select>
                 </span>
                 <span id="ds-vad-controls" class="opt-row">
                   <span class="num-f">最短 <input type="number" id="ds-min-sec" value="3" step="0.5" min="0"><span class="u">秒</span></span>
-                  <span class="num-f">最長 <input type="number" id="ds-max-sec" value="20" step="1" min="1"><span class="u">秒</span></span>
+                  <span class="num-f">最長 <input type="number" id="ds-max-sec" value="20" step="1" min="1" max="30" title="30 秒まで。元のモデルが30秒までしか扱わないため"><span class="u">秒</span></span>
                 </span>
                 <span class="sp"></span>
                 <button id="ds-recommend-btn" class="btn btn-ghost btn-sm" title="音源を測って、切り方と書き起こしの設定をおすすめの値にする">おすすめを入れる</button>

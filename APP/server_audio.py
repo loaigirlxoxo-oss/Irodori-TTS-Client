@@ -311,6 +311,11 @@ def _save_wav(out_path: Path, mono: torch.Tensor, sample_rate: int) -> None:
 # ---------- Endpoints ----------
 
 SPLIT_METHODS = ("vad", "level", "none")
+# Longest clip a dataset may hold. Every base model was trained on at most 750
+# latent frames (max_latent_steps in all configs/*.yaml) and generates at most
+# 30 s, and LoRA training reads only the first 750 frames while keeping the
+# whole transcript, so a longer clip teaches words the audio no longer has.
+CLIP_MAX_SEC = 30.0
 
 
 class SplitRequest(BaseModel):
@@ -320,7 +325,7 @@ class SplitRequest(BaseModel):
     # voice we measured. none: the whole file is one clip (one line per file).
     method: str = Field("vad", description="vad | level | none")
     min_sec: float = Field(3.0, ge=0.0, description="Minimum chunk length in seconds (Anime-whisper hallucinates below ~3s)")
-    max_sec: float = Field(20.0, gt=0.0, description="Maximum chunk length; longer segments are split")
+    max_sec: float = Field(20.0, gt=0.0, le=CLIP_MAX_SEC, description="Maximum chunk length; longer segments are split")
     speech_pad_ms: int = Field(400, ge=0, description="Padding around detected speech, in ms")
     min_silence_ms: int = Field(500, ge=0, description="Min silence (ms) before treating it as a boundary; 100 is too aggressive for dense dialogue")
     level_floor_db: float = Field(45.0, gt=0.0, description="level method: below peak minus this is quiet")
@@ -366,6 +371,25 @@ def _vad_segments(src: Path, req: SplitRequest) -> list[tuple[float, float]]:
         return_seconds=True,
     )
     return [(float(ts["start"]), float(ts["end"])) for ts in timestamps]
+
+
+def _cap_segments(segments: list[tuple[float, float]], audio: np.ndarray, sr: int,
+                  max_sec: float) -> list[tuple[float, float]]:
+    """Cut any segment longer than CLIP_MAX_SEC at its quietest points, losing nothing.
+
+    "none" keeps a file whole and VAD padding can overshoot, so this is the
+    last guard before clips are written.
+    """
+    out: list[tuple[float, float]] = []
+    for start, end in segments:
+        if end - start <= CLIP_MAX_SEC:
+            out.append((start, end))
+            continue
+        levels = _frame_levels_db(audio[int(start * sr):int(end * sr)], sr)
+        pieces = _split_long(0, len(levels), levels, int(max_sec / CHUNK_FRAME_SEC))
+        bounds = [start + s * CHUNK_FRAME_SEC for s, _ in pieces] + [end]
+        out.extend(zip(bounds[:-1], bounds[1:]))
+    return out
 
 
 def _trim_silence(clip: np.ndarray, sr: int, floor_db: float, keep_sec: float) -> np.ndarray:
@@ -415,6 +439,7 @@ def split_audio(req: SplitRequest) -> JSONResponse:
         segments = _level_segments(audio_out, out_sr, req)
     else:
         segments = [(0.0, duration)]
+    segments = _cap_segments(segments, audio_out, out_sr, req.max_sec)
 
     if not segments:
         return JSONResponse(content={"chunks": [], "source": str(src)})
