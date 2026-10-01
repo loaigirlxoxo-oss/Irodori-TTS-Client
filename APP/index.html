@@ -479,6 +479,7 @@
                 </button>
                 <span id="easy-folder-name" class="note">選ばれていません</span>
               </div>
+              <p id="easy-long-note" class="note hidden"></p>
               <p class="note">
                 中の音声をそのまま学習素材にします。生成はしません。
                 読み上げ内容は書き起こして自動で付けます。
@@ -846,6 +847,7 @@
               </div>
               <div id="ds-sources" class="src-list"></div>
               <div id="ds-src-sum" class="stats"></div>
+              <p id="ds-long-note" class="note hidden"></p>
             </div>
 
             <!-- 工程2：分割して書き起こす -->
@@ -869,7 +871,6 @@
                 <button id="ds-recommend-btn" class="btn btn-ghost btn-sm" title="音源を測って、切り方と書き起こしの設定をおすすめの値にする">おすすめを入れる</button>
                 <button id="ds-process-btn" class="btn btn-primary btn-sm"><svg class="i i-sm"><use href="#ic-gen"/></svg>実行</button>
               </div>
-              <p class="note">切れ目なく続く長い発話は、最長の秒数に収まるよう、次の発言が始まる直前で自動で切ります。文の途中で切れることがあるので、長い録音は先に文ごとに分けておくと確実です。</p>
               <p id="ds-recommend-note" class="note"></p>
 
               <details class="more ds-more" id="ds-more">

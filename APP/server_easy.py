@@ -917,7 +917,17 @@ def peek_folder(req: PeekRequest) -> JSONResponse:
     files = _folder_audio(folder)
     if not files:
         raise HTTPException(400, f"音声が見つかりません: {folder}")
-    return JSONResponse(content={"count": len(files), "first": str(files[0])})
+    # 30秒を超える本の数。画面が入れた時点で知らせる（学習には切って使う）
+    from server_audio import CLIP_MAX_SEC
+    import soundfile as sf
+
+    long_count = 0
+    for f in files:
+        try:
+            long_count += sf.info(str(f)).duration > CLIP_MAX_SEC
+        except Exception:  # noqa: BLE001 - 読めない本は書き起こしの段で落ちる
+            pass
+    return JSONResponse(content={"count": len(files), "first": str(files[0]), "long_count": long_count})
 
 
 @router.post("/api/v1/easy/folder")

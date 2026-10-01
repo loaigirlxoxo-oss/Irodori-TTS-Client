@@ -2115,15 +2115,28 @@ async function probeSources(recommend) {
 // 音源ごとの長さ（秒）。分割中の表示に使う
 let dsSourceDurations = {};
 
+// 元のモデルは30秒までしか扱わない（server_audio.CLIP_MAX_SEC）。
+// 超える音源は切って使うが、文の途中で切れることがあるので入れた時点で知らせる
+const LONG_SOURCE_SEC = 30;
+const LONG_SOURCE_NOTE = '30秒を超えるファイルがあります。30秒以上の音声は完全に学習されず、精度に影響します。';
+
+function showLongNote(id, hasLong) {
+  const el = document.getElementById(id);
+  el.textContent = hasLong ? LONG_SOURCE_NOTE : '';
+  el.classList.toggle('hidden', !hasLong);
+}
+
 async function renderSourceSummary() {
   const el = document.getElementById('ds-src-sum');
   if (!el) return;
   dsSourceDurations = {};
+  showLongNote('ds-long-note', false);
   if (dsSourceFiles.length === 0) { el.innerHTML = ''; return; }
   el.innerHTML = `<span>${dsSourceFiles.length} ファイル ・ 長さを測っています…</span>`;
   try {
     const p = await probeSources(false);
     for (const f of p.files || []) dsSourceDurations[f.path] = f.duration;
+    showLongNote('ds-long-note', (p.files || []).some(f => f.duration > LONG_SOURCE_SEC));
     const bad = (p.unreadable || []).length;
     el.innerHTML =
       `<span>音源 <b>${(p.files || []).length}</b> ファイル</span>` +
@@ -4938,6 +4951,7 @@ function easyApplySource() {
     easyFolder = null;
     easyEl('easy-file-name').textContent = '選ばれていません';
     easyEl('easy-folder-name').textContent = '選ばれていません';
+    showLongNote('easy-long-note', false);
   }
 
   if (mode === 'folder') {
@@ -4992,11 +5006,13 @@ async function easyPickFolder() {
     easyRawWav = r.first;
     easyRefWav = r.first;
     easyEl('easy-folder-name').textContent = `${label}（${r.count} 本）`;
+    showLongNote('easy-long-note', (r.long_count || 0) > 0);
   } catch (e) {
     // 選択も捨てる。残すと開始ボタンが有効なままになり、押しても同じ理由で
     // 失敗する（空のフォルダ、読めない音声、写し損ねなど）。
     easyFolder = null;
     easyEl('easy-folder-name').textContent = '選ばれていません';
+    showLongNote('easy-long-note', false);
     easySay(1, `フォルダの中が読めませんでした: ${e.message}`, true);
   }
   easyTuneDirty = true;
