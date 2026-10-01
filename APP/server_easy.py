@@ -1130,13 +1130,23 @@ def _wait_lora_job(job_id: str, status: dict, easy_id: str) -> dict:
 
 
 def _evaluate_checkpoints(job_id: str, ref_wav: str, base: str,
-                          max_steps: int, status: dict, easy_id: str) -> list[dict]:
+                          max_steps: int, status: dict, easy_id: str,
+                          min_progress: float | None = None,
+                          save=None, should_stop=None) -> list[dict]:
     """60%以降のチェックポイントを評価する。
 
     1つずつ一時名で登録して評価文を鳴らし、SIM と CER を測る。全部を評価
     しないのは時間の節約ではなく、浅いものを選ばせないため。
+
+    学習タブも同じ道具で測る（min_progress=0 で全部、save で自分の記録へ書く、
+    should_stop で停止を受ける）。選ぶ規則は pick_checkpoint のまま。
     """
     from easy_eval import MIN_PROGRESS
+
+    if min_progress is None:
+        min_progress = MIN_PROGRESS
+    if save is None:
+        save = lambda st: _write_status(easy_id, st)  # noqa: E731
 
     listing = _http("GET", f"/lora/jobs/{job_id}/checkpoints")
     items = listing.get("checkpoints", []) if isinstance(listing, dict) else listing
@@ -1144,7 +1154,7 @@ def _evaluate_checkpoints(job_id: str, ref_wav: str, base: str,
     targets = []
     for entry in items:
         step = _step_of(entry["name"], max_steps)
-        if step is not None and step >= max_steps * MIN_PROGRESS:
+        if step is not None and step >= max_steps * min_progress:
             targets.append((step, entry["name"]))
     if not targets:
         # save_every が粗いと60%以降が無いことがある。あるものから選ぶ。
@@ -1156,7 +1166,7 @@ def _evaluate_checkpoints(job_id: str, ref_wav: str, base: str,
     scratch: list[str] = []
     try:
         rows = _measure(targets, eval_lines, job_id, ref_wav, base,
-                        status, easy_id, made, scratch)
+                        status, easy_id, made, scratch, save, should_stop)
     finally:
         # 判定に使った音声を片付ける。途中で落ちても消す。
         for w in scratch:
@@ -1181,16 +1191,19 @@ def _evaluate_checkpoints(job_id: str, ref_wav: str, base: str,
 
 def _measure(targets, eval_lines, job_id: str, ref_wav: str, base: str,
              status: dict, easy_id: str, made: list[str],
-             made_wavs: list[str]) -> list[dict]:
+             made_wavs: list[str], save, should_stop=None) -> list[dict]:
     """チェックポイントを1つずつ鳴らして SIM と CER を測る。"""
     from easy_eval import (
         cer, release_eval_models, release_runtime, speaker_similarity, transcribe,
     )
 
     rows: list[dict] = []
+    status["evaluate_total"] = len(targets)
     for index, (step, name) in enumerate(sorted(targets)):
+        if should_stop is not None and should_stop():
+            break
         status["evaluating"] = name
-        _write_status(easy_id, status)
+        save(status)
 
         preview = _preview_name(easy_id, index)
         made.append(preview)
@@ -1227,7 +1240,7 @@ def _measure(targets, eval_lines, job_id: str, ref_wav: str, base: str,
             "cer": sum(cers) / len(cers),
         })
         status["evaluated"] = rows
-        _write_status(easy_id, status)
+        save(status)
 
     return rows
 

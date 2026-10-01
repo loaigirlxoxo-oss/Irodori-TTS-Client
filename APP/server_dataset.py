@@ -537,6 +537,12 @@ def _round_to_nice(value: int, base: int) -> int:
     return max(base, int(round(value / base) * base))
 
 
+def _vram_batch() -> tuple[int, int]:
+    from server_easy import _train_batch_size  # lazily: server_easy imports this module
+
+    return _train_batch_size()
+
+
 @router.get("/api/v1/datasets/{name}/auto_config")
 def auto_config(name: str) -> JSONResponse:
     """Suggest training parameters for a dataset.
@@ -622,6 +628,8 @@ def auto_config(name: str) -> JSONResponse:
             "save_every": int(save_every),
             "log_every": int(log_every),
             "preset": preset,
+            # VRAM に合わせたバッチ。かんたん学習と同じ決め方（実効 32 で揃える）
+            **dict(zip(("batch_size", "gradient_accumulation_steps"), _vram_batch())),
             # 何を根拠に出した数字かを返す。クリップ数ではなく尺で決めている
             # ことが分からないと、同じ本数で違う値が出た理由が伝わらない。
             "basis": "duration",

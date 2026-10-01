@@ -1695,7 +1695,7 @@ async function pollTrainingBusy() {
     const json = await res.json();
     const jobs = json.jobs || [];
     setTrainingBusy(jobs.some(j =>
-      ['pending', 'preparing', 'training', 'stopping'].includes(j.state)));
+      TR_ACTIVE_STATES.includes(j.state)));
   } catch (_) {
     // サーバー未起動などは触らない（誤ってロックしたままにしない）
   }
@@ -2842,6 +2842,48 @@ const trSaveEvery = () => document.getElementById('tr-save-every');
 const trBatchSize = () => document.getElementById('tr-batch-size');
 const trGradAccum = () => document.getElementById('tr-grad-accum');
 const trLr = () => document.getElementById('tr-lr');
+
+// 学習の細かい設定。空なら送らず、サーバーは config の値を使う。
+// 画面にはベースモデルごとの実際の値（/lora/train_defaults）を最初から入れて見せる。
+const TR_SETTING_FIELDS = {
+  learning_rate: ['tr-lr', 'float'],
+  text_encoder_lr: ['tr-te-lr', 'float'],
+  lora_r: ['tr-lora-r', 'int'],
+  lora_alpha: ['tr-lora-alpha', 'int'],
+  lora_dropout: ['tr-lora-dropout', 'float'],
+  weight_decay: ['tr-weight-decay', 'float'],
+  min_lr_scale: ['tr-min-lr-scale', 'float'],
+  warmup_pct: ['tr-warmup-pct', 'float'],
+  decay_pct: ['tr-decay-pct', 'float'],
+  valid_clips: ['tr-valid-clips', 'int'],
+  seed: ['tr-seed', 'int'],
+  gradient_checkpointing: ['tr-grad-ckpt', 'bool'],
+};
+
+function readTrainSettings() {
+  const out = {};
+  for (const [key, [id, kind]] of Object.entries(TR_SETTING_FIELDS)) {
+    const el = document.getElementById(id);
+    if (kind === 'bool') { out[key] = el.checked; continue; }
+    const raw = el.value.trim();
+    if (raw === '') continue;
+    const v = kind === 'int' ? parseInt(raw, 10) : parseFloat(raw);
+    if (Number.isFinite(v)) out[key] = v;
+  }
+  return out;
+}
+
+async function loadTrainDefaults() {
+  const res = await fetch(`${API_URL}/lora/train_defaults?base=${encodeURIComponent(trBase().value)}`);
+  if (!res.ok) throw new Error(`status ${res.status}`);
+  const d = await res.json();
+  for (const [key, [id, kind]] of Object.entries(TR_SETTING_FIELDS)) {
+    if (d[key] == null) continue;
+    const el = document.getElementById(id);
+    if (kind === 'bool') el.checked = !!d[key];
+    else el.value = d[key];
+  }
+}
 const trStartBtn = () => document.getElementById('tr-start-btn');
 const trStopBtn = () => document.getElementById('tr-stop-btn');
 const trStartStatus = () => document.getElementById('tr-start-status');
@@ -2900,7 +2942,7 @@ async function loadTrainJobs() {
     renderJobsTable(jobs);
 
     // Find any active job and set up polling.
-    const active = jobs.find(j => ['pending', 'preparing', 'training', 'stopping'].includes(j.state));
+    const active = jobs.find(j => TR_ACTIVE_STATES.includes(j.state));
     if (active) {
       trActiveJobId = active.id;
       startPolling();
@@ -2917,10 +2959,13 @@ async function loadTrainJobs() {
 
 // 状態は色だけに頼らず字でも示す。色の系統は 4 つに畳む
 // （pending/preparing/training は「走っている」でひとまとめ）。
+// 学習のあとの測定中も GPU を使うので、走っている扱いにする
+const TR_ACTIVE_STATES = ['pending', 'preparing', 'training', 'evaluating', 'stopping'];
 const TR_STATE = {
   pending:   { cls: 'run',  label: '待機中' },
   preparing: { cls: 'run',  label: '準備中' },
   training:  { cls: 'run',  label: '学習中' },
+  evaluating: { cls: 'run', label: '測定中' },
   stopping:  { cls: 'stop', label: '停止中' },
   done:      { cls: 'done', label: '完了' },
   failed:    { cls: 'fail', label: '失敗' },
@@ -3102,6 +3147,10 @@ function renderActiveJob(job) {
   // 開始直後は 1 ステップの時間が安定しないので、少し進むまで出さない。
   const etaEl = document.getElementById('tr-job-eta');
   if (etaEl) etaEl.textContent = trFormatEta(job, step, total);
+  if (etaEl && job.state === 'evaluating') {
+    const ev = job.evaluation || {};
+    etaEl.textContent = `各ステップを測っています ${(ev.rows || []).length} / ${ev.total || '?'}`;
+  }
 
   // 損失は増減も添える。下がっているかが一目で分かればよい。
   trRenderLoss(trJobLoss(), job.current_loss, 'loss');
@@ -3152,8 +3201,8 @@ async function pollActiveJob() {
     if (!res.ok) return;
     const job = await res.json();
     renderActiveJob(job);
-    setTrainingBusy(['pending', 'preparing', 'training', 'stopping'].includes(job.state));
-    if (!['pending', 'preparing', 'training', 'stopping'].includes(job.state)) {
+    setTrainingBusy(TR_ACTIVE_STATES.includes(job.state));
+    if (!TR_ACTIVE_STATES.includes(job.state)) {
       stopPolling();
       trActiveJobId = null;
       // 完了後だけ全体を再読み込み（チカチカ防止のためポーリング中は呼ばない）
@@ -3218,9 +3267,9 @@ async function startTrainingJob() {
     save_every: parseInt(trSaveEvery().value, 10) || 500,
     batch_size: parseInt(trBatchSize().value, 10) || 4,
     gradient_accumulation_steps: parseInt(trGradAccum().value, 10) || 8,
+    evaluate: document.getElementById('tr-evaluate').checked,
+    ...readTrainSettings(),
   };
-  const lrRaw = trLr().value.trim();
-  if (lrRaw) body.learning_rate = parseFloat(lrRaw);
 
   trStartBtn().disabled = true;
   trStartStatus().textContent = 'Starting…';
@@ -3362,16 +3411,23 @@ async function trLoadCheckpoints() {
       sel.appendChild(o);
       return;
     }
+    // 学習後に測っていれば、似ている度（SIM）と読み間違い（CER）を添え、おすすめに印を付ける
+    const ev = json.evaluation || {};
+    const measured = Object.fromEntries((ev.rows || []).map(r => [r.name, r]));
     cks.forEach(c => {
       const o = document.createElement('option');
       o.value = c.name;
       const bits = [];
       if (c.step != null) bits.push(`step ${c.step}`);
+      const m = measured[c.name];
+      if (m) bits.push(`似ている度 ${m.sim.toFixed(3)} / 読み間違い ${(m.cer * 100).toFixed(1)}%`);
       if (c.val_loss != null) bits.push(`val ${c.val_loss.toFixed(6)}`);
       if (c.is_final) bits.push('最終');
-      o.textContent = bits.length ? `${c.name}  (${bits.join(' / ')})` : c.name;
+      const star = ev.picked === c.name ? '★おすすめ  ' : '';
+      o.textContent = `${star}${bits.length ? `${c.name}  (${bits.join(' / ')})` : c.name}`;
       sel.appendChild(o);
     });
+    if (ev.picked && cks.some(c => c.name === ev.picked)) sel.value = ev.picked;
     // 登録名の既定は学習時の名前。
     const job = trTestJobs.find(j => j.id === jobId);
     if (job && !trTestRegName().value) trTestRegName().placeholder = `空欄 = ${job.name}`;
@@ -3577,6 +3633,10 @@ async function applyAutoSetting() {
     const r = json.recommended || {};
     if (r.max_steps != null) trMaxSteps().value = r.max_steps;
     if (r.save_every != null) trSaveEvery().value = r.save_every;
+    if (r.batch_size != null) trBatchSize().value = r.batch_size;
+    if (r.gradient_accumulation_steps != null) trGradAccum().value = r.gradient_accumulation_steps;
+    // 残りの設定はベースモデルの既定に戻す（データ量で変える根拠がまだ無い）
+    await loadTrainDefaults();
     if (r.preset) {
       trPreset().value = r.preset;
       // <select> に無い値を入れると .value は黙って空文字になり、
@@ -3627,6 +3687,16 @@ function setupTrainTab() {
     if (autoBtn) autoBtn.addEventListener('click', applyAutoSetting);
     // Keep Start/Auto enabled state in sync with required fields.
     trDataset().addEventListener('change', updateStartBtnState);
+    // 設定欄にはベースモデルの実際の値を入れて見せる。ベースを替えたら入れ直す。
+    // 起動直後はサーバーがまだ上がっていないことがあるので、タブを開いたときにも入れる。
+    const fillDefaults = () => loadTrainDefaults().catch(err => {
+      trStartStatus().textContent = `設定の既定値を読めませんでした: ${err.message}`;
+    });
+    trBase().addEventListener('change', fillDefaults);
+    let defaultsFilled = false;
+    document.querySelector('.tab-btn[data-tab="train"]')?.addEventListener('click', () => {
+      if (!defaultsFilled) { defaultsFilled = true; fillDefaults(); }
+    });
   } catch (err) {
     console.error('[train] setupTrainTab failed:', err);
     const st = trTestStatus();

@@ -395,7 +395,7 @@ def _now_iso() -> str:
 
 # Non-terminal states. A job in one of these when the server (re)starts is an
 # orphan: no worker thread survives a process restart.
-_ACTIVE_STATES = ("pending", "preparing", "training", "stopping", "stop_failed")
+_ACTIVE_STATES = ("pending", "preparing", "training", "evaluating", "stopping", "stop_failed")
 
 # 停止を試みたが kill できず、学習プロセスが生き残っている可能性がある状態。
 # 「終わった」わけではないので _ACTIVE_STATES に含める。ここを外すと、
@@ -428,6 +428,13 @@ def recover_orphan_jobs() -> None:
             continue
 
         job_id = job_dir.name
+        if status.get("state") == "evaluating":
+            # 学習は終わっていて、測っている途中で止まっただけ。チェックポイントは
+            # 揃っているので失敗にはしない。trainer も残っていない。
+            ev = dict(status.get("evaluation") or {}, state="interrupted")
+            _update_status(job_id, state="done", finished_at=_now_iso(), evaluation=ev)
+            recovered += 1
+            continue
         note = "interrupted by server restart"
         pid = status.get("pid")
         survivor = False  # 生きた trainer が残っている可能性があるか
@@ -618,7 +625,7 @@ _MAX_VALID_FRACTION = 0.10
 _RATIO_DECIMALS = 6
 
 
-def _valid_ratio_for(num_clips: int) -> float:
+def _valid_ratio_for(num_clips: int, target_clips: Optional[int] = None) -> float:
     """Fraction of the dataset to hold out for validation.
 
     The configs ship valid_ratio=0.0005, sized for the tens of thousands of
@@ -637,7 +644,12 @@ def _valid_ratio_for(num_clips: int) -> float:
         # train.py は 2 件未満だと分割自体を拒否する。0 を渡して検証を切る。
         return 0.0
 
-    target = min(_MIN_VALID_CLIPS, max(1, int(clips * _MAX_VALID_FRACTION)))
+    if target_clips is None:
+        target = min(_MIN_VALID_CLIPS, max(1, int(clips * _MAX_VALID_FRACTION)))
+    elif target_clips <= 0:
+        return 0.0
+    else:
+        target = int(target_clips)
     target = max(1, min(target, clips - 1))
 
     ratio = round(target / clips, _RATIO_DECIMALS)
@@ -648,7 +660,8 @@ def _valid_ratio_for(num_clips: int) -> float:
     return min(ratio, 1.0 - step)
 
 
-def _lr_schedule_for(max_steps: int) -> tuple[int, int]:
+def _lr_schedule_for(max_steps: int, warmup_pct: float = 100.0 / _WARMUP_RATIO,
+                     decay_pct: float = 25.0) -> tuple[int, int]:
     """Return (warmup_steps, stable_steps) scaled to this run's length.
 
     stable_steps is a duration measured after warmup, not a boundary:
@@ -662,13 +675,13 @@ def _lr_schedule_for(max_steps: int) -> tuple[int, int]:
     # そのまま使うと、max_steps が下限付近（受け口は 10 以上を許す）のときに
     # warmup が全体を占め、安定も減衰も無いまま終わる。
     # 全体の半分を超えないよう頭を押さえる。
-    warmup = max(_MIN_WARMUP_STEPS, steps // _WARMUP_RATIO)
+    warmup = max(_MIN_WARMUP_STEPS, int(steps * warmup_pct / 100.0))
     warmup = min(warmup, max(1, steps // 2))
 
     remaining = steps - warmup
     if remaining <= 0:
         return warmup, 0
-    decay = max(1, remaining // 4)  # 末尾25%は必ず減衰に充てる
+    decay = max(1, int(remaining * decay_pct / 100.0))  # 末尾（既定25%）は必ず減衰に充てる
     stable = remaining - decay
     return warmup, stable
 
@@ -687,6 +700,17 @@ def _build_train_command(
     log_every: int,
     num_clips: int,
     learning_rate: Optional[float] = None,
+    text_encoder_lr: Optional[float] = None,
+    lora_r: Optional[int] = None,
+    lora_alpha: Optional[int] = None,
+    lora_dropout: Optional[float] = None,
+    weight_decay: Optional[float] = None,
+    min_lr_scale: Optional[float] = None,
+    warmup_pct: Optional[float] = None,
+    decay_pct: Optional[float] = None,
+    valid_clips: Optional[int] = None,
+    seed: Optional[int] = None,
+    gradient_checkpointing: Optional[bool] = None,
 ) -> list[str]:
     """Build the train.py command line for a LoRA job.
 
@@ -697,7 +721,8 @@ def _build_train_command(
     partway through warmup: at 110 steps the rate only ever reaches 11% of the
     target and the adapter learns essentially nothing.
     """
-    warmup_steps, stable_steps = _lr_schedule_for(max_steps)
+    sched = {k: v for k, v in (("warmup_pct", warmup_pct), ("decay_pct", decay_pct)) if v is not None}
+    warmup_steps, stable_steps = _lr_schedule_for(max_steps, **sched)
     # 既定の 50 のままだと、短いジョブ（推奨は100前後）では進捗行が数回しか出ず、
     # 数分から十数分のあいだ止まったように見える。少なくとも20回は出す。
     log_every = max(1, min(int(log_every), max(1, int(max_steps) // 20)))
@@ -715,7 +740,7 @@ def _build_train_command(
         # 検証が一度も走らないまま終わる。val_loss を各世代の目安として
         # 一覧に出したいので、save 頻度に合わせて必ず走らせる。
         "--valid-every", str(int(save_every)),
-        "--valid-ratio", f"{_valid_ratio_for(num_clips):.4f}",
+        "--valid-ratio", f"{_valid_ratio_for(num_clips, valid_clips):.6f}",
         "--batch-size", str(int(batch_size)),
         "--gradient-accumulation-steps", str(int(gradient_accumulation_steps)),
         "--save-every", str(int(save_every)),
@@ -728,8 +753,17 @@ def _build_train_command(
         "--lora-target-modules", lora_target_modules,
         "--no-progress",  # avoid tqdm spam; rely on `step=NNN loss=...` lines
     ]
-    if learning_rate is not None:
-        cmd += ["--lr", str(float(learning_rate))]
+    # 渡されたものだけ足す。渡さなければ config の値のまま（これまでどおり）。
+    optional = (
+        ("--lr", learning_rate), ("--pretrained-text-encoder-learning-rate", text_encoder_lr),
+        ("--lora-r", lora_r), ("--lora-alpha", lora_alpha), ("--lora-dropout", lora_dropout),
+        ("--weight-decay", weight_decay), ("--min-lr-scale", min_lr_scale), ("--seed", seed),
+    )
+    for flag, value in optional:
+        if value is not None:
+            cmd += [flag, str(value)]
+    if gradient_checkpointing is not None:
+        cmd.append("--gradient-checkpointing" if gradient_checkpointing else "--no-gradient-checkpointing")
     return cmd
 
 
@@ -949,6 +983,7 @@ def _run_job(job_id: str, params: dict) -> None:
             log_every=params["log_every"],
             num_clips=sum(1 for _ in manifest.open(encoding="utf-8")),
             learning_rate=params.get("learning_rate"),
+            **{k: params.get(k) for k in TRAIN_SETTING_KEYS},
         )
         # spawn の直前に最後の確認。ここを通ってから起動までは一瞬なので、
         # そこで来た停止要求は pid 記録後のチェックが拾う。
@@ -1047,6 +1082,16 @@ def _run_job(job_id: str, params: dict) -> None:
             f"[job] finished; {n_ckpt} checkpoint(s) ready to audition"
             + (f" (freed {freed / (1 << 30):.1f} GB of optimizer state)" if freed else "")
         )
+        # かんたん学習は自分で測って選ぶので、ここでは測らない（二重になる）。
+        if params.get("evaluate", True) and not params.get("easy_token"):
+            _update_status(job_id, state="evaluating")
+            log("[job] measuring every checkpoint (SIM / CER on the evaluation lines)")
+            try:
+                _evaluate_job(job_id, params)
+            except Exception as exc:  # noqa: BLE001 - 測れなくても学習の結果は使える
+                _update_status(job_id, evaluation={"state": "failed",
+                                                   "error": f"{type(exc).__name__}: {exc}"})
+                log(f"[job] evaluation failed: {type(exc).__name__}: {exc}")
         _update_status(
             job_id,
             state="done",
@@ -1073,6 +1118,40 @@ def _run_job(job_id: str, params: dict) -> None:
                 _active_job_id = None
 
 
+def _evaluate_job(job_id: str, params: dict) -> None:
+    """Measure each checkpoint and mark the one to recommend.
+
+    Same tools and rule as the easy tab (SIM against a reference, CER of the
+    evaluation lines, pick_checkpoint). The reference is the dataset's first
+    clip, as the easy tab does for a folder. Every checkpoint is measured and
+    shown; the recommendation follows pick_checkpoint, which only considers
+    the last 40% of the run.
+    """
+    import server_easy
+    from easy_eval import pick_checkpoint
+
+    clips = sorted(get_dataset_dir(params["dataset"]).joinpath("clips").glob("*.wav"))
+    if not clips:
+        raise RuntimeError("データセットに音声がありません")
+    ref = str(clips[0])
+
+    def save(st: dict) -> None:
+        _update_status(job_id, evaluation={
+            "state": "running", "rows": st.get("evaluated", []),
+            "current": st.get("evaluating"), "total": st.get("evaluate_total"),
+        })
+
+    rows = server_easy._evaluate_checkpoints(
+        job_id, ref, params["base"], int(params["max_steps"]), {}, f"tr{job_id}",
+        min_progress=0.0, save=save, should_stop=lambda: _was_stop_requested(job_id))
+    stopped = _was_stop_requested(job_id)
+    result = {"state": "stopped" if stopped else "done", "rows": rows, "ref": ref}
+    if rows:
+        picked = pick_checkpoint(rows, int(params["max_steps"]))
+        result.update(picked=picked["name"], fallback=picked["fallback"])
+    _update_status(job_id, evaluation=result)
+
+
 # === Endpoints ===
 
 class StartJobRequest(BaseModel):
@@ -1089,6 +1168,20 @@ class StartJobRequest(BaseModel):
     save_every: int = Field(1000, ge=10)
     log_every: int = Field(50, ge=1)
     learning_rate: Optional[float] = Field(None, gt=0)
+    # 学習のあと各チェックポイントを測っておすすめに印を付ける（かんたん学習と同じ道具）
+    evaluate: bool = Field(True, description="Measure every checkpoint after training")
+    # 以下は空なら config の値。画面は /lora/train_defaults の値を最初から入れて見せる。
+    text_encoder_lr: Optional[float] = Field(None, gt=0, description="pretrained text encoder LR")
+    lora_r: Optional[int] = Field(None, ge=1, le=256)
+    lora_alpha: Optional[int] = Field(None, ge=1, le=1024)
+    lora_dropout: Optional[float] = Field(None, ge=0.0, lt=1.0)
+    weight_decay: Optional[float] = Field(None, ge=0.0, le=1.0)
+    min_lr_scale: Optional[float] = Field(None, ge=0.0, le=1.0)
+    warmup_pct: Optional[float] = Field(None, ge=0.0, le=50.0)
+    decay_pct: Optional[float] = Field(None, ge=1.0, le=100.0)
+    valid_clips: Optional[int] = Field(None, ge=0, le=1000, description="0 = no validation")
+    seed: Optional[int] = Field(None, ge=0, le=2**31 - 1)
+    gradient_checkpointing: Optional[bool] = None
     overwrite: bool = Field(
         False,
         description="If true, delete an existing LoRA with the same name before starting",
@@ -1117,6 +1210,41 @@ class StartJobRequest(BaseModel):
         if self.log_every > self.save_every:
             self.log_every = self.save_every
         return self
+
+
+TRAIN_SETTING_KEYS = ("text_encoder_lr", "lora_r", "lora_alpha", "lora_dropout", "weight_decay",
+                      "min_lr_scale", "warmup_pct", "decay_pct", "valid_clips", "seed",
+                      "gradient_checkpointing")
+
+
+@router.get("/api/v1/lora/train_defaults")
+def train_defaults(base: str) -> JSONResponse:
+    """What a job uses for each setting when the request leaves it empty.
+
+    Read from the base's training config so the screen shows the real values
+    instead of hiding them; the schedule shares and validation count are the
+    server's own (see _lr_schedule_for / _valid_ratio_for).
+    """
+    if base not in BASE_CONFIGS:
+        raise HTTPException(400, f"unknown base: {base}")
+    import yaml
+
+    cfg = yaml.safe_load((_PROJECT_ROOT / BASE_CONFIGS[base]["config_file"]).read_text(encoding="utf-8"))
+    t = cfg.get("train", {}) or {}
+    return JSONResponse(content={
+        "learning_rate": t.get("learning_rate"),
+        "text_encoder_lr": t.get("pretrained_text_encoder_learning_rate"),
+        "lora_r": t.get("lora_r"),
+        "lora_alpha": t.get("lora_alpha"),
+        "lora_dropout": t.get("lora_dropout"),
+        "weight_decay": t.get("weight_decay"),
+        "min_lr_scale": t.get("min_lr_scale"),
+        "warmup_pct": 100.0 / _WARMUP_RATIO,
+        "decay_pct": 25.0,
+        "valid_clips": _MIN_VALID_CLIPS,
+        "seed": t.get("seed", 0),
+        "gradient_checkpointing": bool(t.get("gradient_checkpointing", False)),
+    })
 
 
 @router.post("/api/v1/lora/jobs")
@@ -1240,6 +1368,12 @@ def stop_job(job_id: str) -> JSONResponse:
     s = _read_status(job_id)
     if s is None:
         raise HTTPException(404, f"job {job_id!r} not found")
+    if s.get("state") == "evaluating":
+        # 学習は終わっている。測るのを次のチェックポイントの手前で止め、
+        # 測れた分だけでおすすめを出す。学習プロセスはもう無いので kill しない
+        # （記録に残った pid は別のプロセスに再利用されているかもしれない）。
+        _mark_stop_requested(job_id)
+        return JSONResponse(content={"status": "ok", "job_id": job_id, "state": "evaluating"})
     if s.get("state") not in ("pending", "preparing", "training"):
         return JSONResponse(content={"status": "noop", "state": s.get("state")})
 
@@ -1425,6 +1559,8 @@ def list_job_checkpoints(job_id: str) -> JSONResponse:
         "registered_checkpoint": s.get("registered_checkpoint"),
         "checkpoints": _list_job_checkpoints(job_id),
         "checkpoints_bytes": _job_checkpoints_size(job_id),
+        # 学習後の測定（SIM / CER）とおすすめ。測っていないジョブは None
+        "evaluation": s.get("evaluation"),
     })
 
 

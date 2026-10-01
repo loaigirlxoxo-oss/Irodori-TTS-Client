@@ -733,24 +733,84 @@
                 <input type="number" id="tr-save-every" value="500" min="10" step="100">
               </div>
 
-              <div class="wide">
-                <details class="more">
-                  <summary><svg class="i i-sm chev"><use href="#ic-chev"/></svg>細かい設定（VRAM・学習率）</summary>
-                  <div class="more-body cfg" style="padding:10px 0 0;">
+              <div class="wide ds-opt-grid tr-opt-grid">
+                <div class="ds-opt-grp">
+                  <div class="ds-opt-hd">バッチ・VRAM</div>
+                  <div class="two">
                     <div class="param-group">
-                      <label for="tr-batch-size">バッチサイズ</label>
-                      <input type="number" id="tr-batch-size" value="4" min="1">
+                      <label for="tr-batch-size">バッチサイズ <span class="en">1回に載せる本数</span></label>
+                      <input type="number" id="tr-batch-size" value="4" step="1" min="1" max="128" title="大きいほど VRAM を使う。足りないと極端に遅くなる">
                     </div>
                     <div class="param-group">
-                      <label for="tr-grad-accum">勾配の蓄積</label>
-                      <input type="number" id="tr-grad-accum" value="8" min="1">
-                    </div>
-                    <div class="param-group wide">
-                      <label for="tr-lr">学習率</label>
-                      <input type="text" id="tr-lr" placeholder="空欄 = 既定（1e-4）">
+                      <label for="tr-grad-accum">勾配の蓄積 <span class="en">回</span></label>
+                      <input type="number" id="tr-grad-accum" value="8" step="1" min="1" max="64" title="この回数ぶん溜めてから1回更新する。バッチサイズ×この値が実際のバッチ">
                     </div>
                   </div>
-                </details>
+                  <label class="chk" title="VRAM を減らす代わりに遅くなる"><input type="checkbox" id="tr-grad-ckpt"> 勾配チェックポイント（VRAM を減らす・遅くなる）</label>
+
+                  <div class="ds-opt-hd">LoRA</div>
+                  <div class="two">
+                    <div class="param-group">
+                      <label for="tr-lora-r">ランク <span class="en">r</span></label>
+                      <input type="number" id="tr-lora-r" step="1" min="1" max="256" title="LoRA の大きさ。大きいほど細かく覚えるが、少ないデータでは崩れやすい">
+                    </div>
+                    <div class="param-group">
+                      <label for="tr-lora-alpha">アルファ <span class="en">α</span></label>
+                      <input type="number" id="tr-lora-alpha" step="1" min="1" max="1024" title="効き具合の倍率。ふつうはランクの2倍">
+                    </div>
+                  </div>
+                    <div class="param-group">
+                      <label for="tr-lora-dropout">ドロップアウト <span class="en">0〜0.9</span></label>
+                      <input type="number" id="tr-lora-dropout" step="0.01" min="0" max="0.9" title="学習中に一部を休ませる割合。覚えすぎを抑える">
+                    </div>
+
+                  <div class="ds-opt-hd">検証・再現</div>
+                  <label class="chk" title="かんたん学習と同じ10文を読ませ、声の似ている度と読み間違いを測る"><input type="checkbox" id="tr-evaluate" checked> 学習のあと各ステップを測って、おすすめに印を付ける</label>
+                  <div class="two">
+                    <div class="param-group">
+                      <label for="tr-valid-clips">検証に取り分ける本数 <span class="en">0 = しない</span></label>
+                      <input type="number" id="tr-valid-clips" step="1" min="0" max="1000" title="学習に使わず、val の計算に回す本数">
+                    </div>
+                    <div class="param-group">
+                      <label for="tr-seed">乱数の種 <span class="en"></span></label>
+                      <input type="number" id="tr-seed" step="1" min="0" title="同じ値なら同じ取り分け・同じ初期値で学習する">
+                    </div>
+                  </div>
+                </div>
+
+                <div class="ds-opt-grp">
+                  <div class="ds-opt-hd">学習率</div>
+                  <div class="two">
+                    <div class="param-group">
+                      <label for="tr-lr">学習率 <span class="en">本体</span></label>
+                      <input type="text" id="tr-lr" title="1回の更新でどれだけ動かすか。大きいほど速く覚えるが崩れやすい">
+                    </div>
+                    <div class="param-group">
+                      <label for="tr-te-lr">テキスト側の学習率 <span class="en">読みの部分</span></label>
+                      <input type="text" id="tr-te-lr" title="文章を読む部分の学習率。学習範囲が「全体」のときに効く">
+                    </div>
+                  </div>
+                  <div class="two">
+                    <div class="param-group">
+                      <label for="tr-warmup-pct">ウォームアップ <span class="en">% ・最初に少しずつ上げる</span></label>
+                      <input type="number" id="tr-warmup-pct" step="1" min="0" max="50" title="全体のうち、学習率を0から上げていく割合">
+                    </div>
+                    <div class="param-group">
+                      <label for="tr-decay-pct">減衰 <span class="en">% ・最後に下げていく</span></label>
+                      <input type="number" id="tr-decay-pct" step="1" min="1" max="100" title="ウォームアップの後の残りのうち、最後に学習率を下げていく割合">
+                    </div>
+                  </div>
+                  <div class="two">
+                    <div class="param-group">
+                      <label for="tr-min-lr-scale">最低学習率 <span class="en">倍率</span></label>
+                      <input type="number" id="tr-min-lr-scale" step="0.01" min="0" max="1" title="減衰の終わりで、学習率をここまで下げる（1 = 下げない）">
+                    </div>
+                    <div class="param-group">
+                      <label for="tr-weight-decay">重み減衰 <span class="en"></span></label>
+                      <input type="number" id="tr-weight-decay" step="0.001" min="0" max="1" title="値が大きくなりすぎないよう、毎回少しずつ引き戻す強さ">
+                    </div>
+                  </div>
+                </div>
               </div>
             </div>
 
