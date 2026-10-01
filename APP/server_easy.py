@@ -1138,34 +1138,20 @@ def _wait_lora_job(job_id: str, status: dict, easy_id: str) -> dict:
 
 def _evaluate_checkpoints(job_id: str, ref_wav: str, base: str,
                           max_steps: int, status: dict, easy_id: str,
-                          min_progress: float | None = None,
                           save=None, should_stop=None) -> list[dict]:
-    """60%以降のチェックポイントを評価する。
+    """全チェックポイントを評価する。
 
-    1つずつ一時名で登録して評価文を鳴らし、SIM と CER を測る。全部を評価
-    しないのは時間の節約ではなく、浅いものを選ばせないため。
-
-    学習タブも同じ道具で測る（min_progress=0 で全部、save で自分の記録へ書く、
-    should_stop で停止を受ける）。選ぶ規則は pick_checkpoint のまま。
+    1つずつ一時名で登録して評価文を鳴らし、SIM と CER を測る。選ぶのは
+    pick_by_score（全部から、合わせた点数で）。学習タブも同じ道具で測る
+    （save で自分の記録へ書く、should_stop で停止を受ける）。
     """
-    from easy_eval import MIN_PROGRESS
-
-    if min_progress is None:
-        min_progress = MIN_PROGRESS
     if save is None:
         save = lambda st: _write_status(easy_id, st)  # noqa: E731
 
     listing = _http("GET", f"/lora/jobs/{job_id}/checkpoints")
     items = listing.get("checkpoints", []) if isinstance(listing, dict) else listing
 
-    targets = []
-    for entry in items:
-        step = _step_of(entry["name"], max_steps)
-        if step is not None and step >= max_steps * min_progress:
-            targets.append((step, entry["name"]))
-    if not targets:
-        # save_every が粗いと60%以降が無いことがある。あるものから選ぶ。
-        targets = [(_step_of(e["name"], max_steps) or 0, e["name"]) for e in items]
+    targets = [(_step_of(e["name"], max_steps) or 0, e["name"]) for e in items]
 
     eval_lines = load_eval_lines()
     rows: list[dict] = []
@@ -1267,7 +1253,7 @@ def _step_of(checkpoint_name: str, max_steps: int) -> int | None:
 
 
 def _run_train(easy_id: str, req: TrainRequest) -> None:
-    from easy_eval import pick_checkpoint
+    from easy_eval import pick_by_score
 
     status = _read_status(easy_id) or {}
     try:
@@ -1306,7 +1292,7 @@ def _run_train(easy_id: str, req: TrainRequest) -> None:
             train_id, req.ref_wav, req.base, max_steps, status, easy_id
         )
 
-        picked = pick_checkpoint(rows, max_steps)
+        picked = pick_by_score(rows)
         # 始めるときに見ているが、20〜30分のあいだに別のタブや API から
         # 同じ名前で登録されていることがある。登録は同名フォルダを消して
         # 置き換えるので、ここでもう一度見る。

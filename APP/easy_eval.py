@@ -256,19 +256,6 @@ def transcribe(wav_path: str) -> str:
 
 # === 採用 ===
 
-# 読みが崩れているとみなす閾値。これを超えたら SIM が高くても使わない。
-CER_LIMIT = 0.10
-
-# 足切りで全滅したときに「SIM が同等」とみなす幅。実測でチェックポイント間の
-# SIM の幅は 0.023 程度しかなく、この範囲の上下は声質の差として聞き取れない。
-SIM_BAND = 0.02
-
-# 評価対象にする学習の進み具合。SIM/CER だけで選ぶと、時々まだ浅い
-# チェックポイントが当たってしまう。総ステップのここから先だけを見ることで
-# 構造的に防ぐ。
-MIN_PROGRESS = 0.60
-
-
 # 評価文の測り方（presets/easy_eval_lines.txt の頭書きと揃える）。
 # 喘ぎは書き起こしが当てにならない（実在作品の台本と照合して CER 26〜29%）ので
 # 読み間違いに入れない。声の似ている度には入れる。
@@ -319,53 +306,16 @@ def combined_score(row: dict) -> float:
 
 
 def pick_by_score(rows: list[dict]) -> dict:
-    """学習タブのおすすめ。全チェックポイントから合わせた点数が最も高いもの。
+    """採用するチェックポイント（かんたん学習）とおすすめ（学習タブ）。
 
-    同点なら学習が進んだほう。前半だけを外す規則（pick_checkpoint）は使わない。
+    全チェックポイントから、似ている度と読み間違いを合わせた点数が最も高いもの。
+    同点なら学習が進んだほう。以前は総ステップの60%未満を見なかったが、
     学習を通して一番良かったのが前半ということがある（コハルは 1300 中 500）。
     """
     if not rows:
         raise ValueError("評価できるチェックポイントがありません")
     best = max(rows, key=lambda r: (combined_score(r), r["step"]))
     return dict(best, score=combined_score(best), fallback=False)
-
-
-def pick_checkpoint(rows: list[dict], max_steps: int) -> dict:
-    """採用するチェックポイントを決める。
-
-    val_loss は当てにならないので使わない。SIM を主、CER を足切りにする。
-    LoRA の目的は声を似せることなので SIM が本命で、CER は読みが崩れて
-    いないかの確認に使う。
-
-    rows は {"name", "step", "sim", "cer"} の列。返すのはその1件に
-    "fallback"（足切りで全滅して最終に落ちたか）を足したもの。
-    """
-    if not rows:
-        raise ValueError("評価できるチェックポイントがありません")
-
-    late = [r for r in rows if r["step"] >= max_steps * MIN_PROGRESS]
-    if not late:
-        # save_every が粗いと60%以降が1つも無いことがある。何も選べない
-        # よりは、あるものから選ぶ。
-        late = rows
-
-    passed = [r for r in late if r["cer"] <= CER_LIMIT]
-    if passed:
-        best = max(passed, key=lambda r: r["sim"])
-        return dict(best, fallback=False)
-
-    # 全滅したときに「最後のもの」を選ぶと、読みが一番崩れたものが当たる
-    # ことがある（実測: 囁き声の LoRA で CER 0.319〜0.559 の中から最悪の
-    # 0.559 が選ばれた）。候補の中から選び直す。
-    #
-    # SIM の差は小さい。実測ではチェックポイント7本の幅が 0.776〜0.799 と
-    # 0.023 しかなく、この程度の差は誤差。そこで SIM が最良から SIM_BAND
-    # 以内のものを「同等」とみなし、その中で CER が最小のものを採る。
-    # 同点なら学習が進んでいるほうを採る。
-    top = max(r["sim"] for r in late)
-    near = [r for r in late if r["sim"] >= top - SIM_BAND]
-    best = min(near, key=lambda r: (r["cer"], -r["step"]))
-    return dict(best, fallback=True)
 
 
 def release_runtime() -> bool:
@@ -460,7 +410,7 @@ def release_eval_models() -> bool:
 # させると、LoRA がその崩れごと覚える。採用の判断に使っているのと同じ
 # 道具（ECAPA と anime-whisper）を、素材の選別にも使う。
 
-# 読み間違いの上限。採用時（0.10）より緩くする。1本ずつの短い音声では
+# 読み間違いの上限。採用の判定（評価文の読み間違い）より緩くする。1本ずつの短い音声では
 # 書き起こしが揺れやすく、厳しくすると正常な本まで落ちるため。
 CLIP_CER_LIMIT = 0.25
 

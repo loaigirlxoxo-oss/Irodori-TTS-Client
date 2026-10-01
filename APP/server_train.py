@@ -1122,13 +1122,8 @@ def _evaluate_job(job_id: str, params: dict) -> None:
     """Measure each checkpoint and mark the one to recommend.
 
     Same tools and rule as the easy tab (SIM against a reference, CER of the
-    evaluation lines, pick_checkpoint). The reference is the dataset's first
-    clip, as the easy tab does for a folder. Every checkpoint is measured and
-    shown; the recommendation follows pick_checkpoint, which only considers
-    the last 40% of the run.
-
-    The recommendation here is pick_by_score over every checkpoint (similarity
-    and misreads combined); the easy tab keeps pick_checkpoint.
+    evaluation lines, pick_by_score over every checkpoint). The reference is
+    the dataset's first clip, as the easy tab does for a folder.
     """
     import server_easy
     from easy_eval import combined_score, pick_by_score
@@ -1146,7 +1141,7 @@ def _evaluate_job(job_id: str, params: dict) -> None:
 
     rows = server_easy._evaluate_checkpoints(
         job_id, ref, params["base"], int(params["max_steps"]), {}, f"tr{job_id}",
-        min_progress=0.0, save=save, should_stop=lambda: _was_stop_requested(job_id))
+        save=save, should_stop=lambda: _was_stop_requested(job_id))
     stopped = _was_stop_requested(job_id)
     result = {"state": "stopped" if stopped else "done", "rows": rows, "ref": ref}
     if rows:
