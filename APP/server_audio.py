@@ -340,7 +340,9 @@ def _level_segments(audio: np.ndarray, sr: int, req: SplitRequest) -> list[tuple
     """Speech spans by loudness, padded and held within min/max length."""
     spans = _sound_chunks(audio, sr, floor_db=req.level_floor_db,
                           join_gap_sec=req.min_silence_ms / 1000.0,
-                          min_sec=req.min_sec, max_sec=req.max_sec)
+                          min_sec=req.min_sec, max_sec=len(audio) / sr + 1.0)
+    # Runs with no pause of min_silence_ms are cut just before the next utterance.
+    spans = _cap_segments(spans, audio, sr, req.max_sec, req.max_sec, req.level_floor_db)
     pad = req.speech_pad_ms / 1000.0
     duration = len(audio) / sr
     out: list[tuple[float, float]] = []
@@ -373,20 +375,47 @@ def _vad_segments(src: Path, req: SplitRequest) -> list[tuple[float, float]]:
     return [(float(ts["start"]), float(ts["end"])) for ts in timestamps]
 
 
-def _cap_segments(segments: list[tuple[float, float]], audio: np.ndarray, sr: int,
-                  max_sec: float) -> list[tuple[float, float]]:
-    """Cut any segment longer than CLIP_MAX_SEC at its quietest points, losing nothing.
+# A forced cut sits this far before the next utterance starts.
+CUT_BEFORE_ONSET_SEC = 0.1
 
-    "none" keeps a file whole and VAD padding can overshoot, so this is the
-    last guard before clips are written.
+
+def _split_before_onset(levels: np.ndarray, floor_db: float, max_frames: int) -> list[tuple[int, int]]:
+    """Cut a run into pieces of at most max_frames, just before the next utterance.
+
+    The pause is chosen as before (the quietest frame in the second half of the
+    window; measured on 286 min of acted lines it never fell inside a voice and
+    84% of cuts fell between lines), but the cut moves to the end of that pause
+    so the pause stays with the line it follows: the timing is part of the acting.
     """
+    n = len(levels)
+    silent = levels <= float(levels.max()) - floor_db
+    margin = int(CUT_BEFORE_ONSET_SEC / CHUNK_FRAME_SEC)
+    out, start = [], 0
+    while n - start > max_frames:
+        lo, hi = start + max_frames // 2, start + max_frames
+        q = lo + int(np.argmin(levels[lo:hi]))
+        cut = q
+        if silent[q]:
+            onset = q
+            while onset < n and silent[onset]:
+                onset += 1
+            cut = min(max(q, onset - margin), hi)
+        out.append((start, cut))
+        start = cut
+    out.append((start, n))
+    return out
+
+
+def _cap_segments(segments: list[tuple[float, float]], audio: np.ndarray, sr: int, limit_sec: float,
+                  max_sec: float, floor_db: float) -> list[tuple[float, float]]:
+    """Cut any segment longer than limit_sec into pieces of at most max_sec, losing nothing."""
     out: list[tuple[float, float]] = []
     for start, end in segments:
-        if end - start <= CLIP_MAX_SEC:
+        if end - start <= limit_sec:
             out.append((start, end))
             continue
         levels = _frame_levels_db(audio[int(start * sr):int(end * sr)], sr)
-        pieces = _split_long(0, len(levels), levels, int(max_sec / CHUNK_FRAME_SEC))
+        pieces = _split_before_onset(levels, floor_db, int(max_sec / CHUNK_FRAME_SEC))
         bounds = [start + s * CHUNK_FRAME_SEC for s, _ in pieces] + [end]
         out.extend(zip(bounds[:-1], bounds[1:]))
     return out
@@ -439,7 +468,8 @@ def split_audio(req: SplitRequest) -> JSONResponse:
         segments = _level_segments(audio_out, out_sr, req)
     else:
         segments = [(0.0, duration)]
-    segments = _cap_segments(segments, audio_out, out_sr, req.max_sec)
+    # "none" keeps a file whole and VAD padding can overshoot: last guard.
+    segments = _cap_segments(segments, audio_out, out_sr, CLIP_MAX_SEC, req.max_sec, req.level_floor_db)
 
     if not segments:
         return JSONResponse(content={"chunks": [], "source": str(src)})

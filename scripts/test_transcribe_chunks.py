@@ -109,19 +109,19 @@ def test_trim_keeps_inner_pause() -> None:
 def test_cap_cuts_long_clip_at_pauses_without_loss() -> None:
     # 70 s: 7 s of voice, 1 s of quiet, repeated
     audio = np.concatenate([np.concatenate([_tone(7.0), _silence(1.0)]) for _ in range(9)])[: SR * 70]
-    out = _cap_segments([(0.0, 70.0)], audio, SR, 20.0)
+    out = _cap_segments([(0.0, 70.0)], audio, SR, CLIP_MAX_SEC, 20.0, 45.0)
     assert len(out) >= 4
     assert all(e - s <= 20.0 + 1e-6 for s, e in out)
     assert out[0][0] == 0.0 and out[-1][1] == 70.0
     assert all(abs(a[1] - b[0]) < 1e-9 for a, b in zip(out, out[1:]))
-    # cut points fall in the quiet stretches
-    assert all((s % 8.0) >= 7.0 - 0.02 for s, _ in out[1:])
+    # each cut sits 0.1 s before the next utterance: the pause stays with the line before it
+    assert all(abs((s % 8.0) - 7.9) < 0.02 for s, _ in out[1:]), out
 
 
 def test_cap_leaves_short_segments_alone() -> None:
     audio = _tone(40.0)
     segs = [(0.0, 12.0), (12.0, 12.0 + CLIP_MAX_SEC)]
-    assert _cap_segments(segs, audio, SR, 20.0) == segs
+    assert _cap_segments(segs, audio, SR, CLIP_MAX_SEC, 20.0, 45.0) == segs
 
 
 def test_trim_leaves_silent_clip_alone() -> None:
