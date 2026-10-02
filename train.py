@@ -1887,11 +1887,11 @@ def _compile_blocks(raw_model, train_cfg, is_main_process: bool) -> None:
     import importlib
     import importlib.util
 
-    # Triton は C コンパイラを、環境変数 CC → Visual Studio の開発者環境（VSINSTALLDIR など）→
-    # 同梱の TinyCC の順に探す。開発者環境の変数だけ持っていて INCLUDE が無いと cl.exe を選んで
-    # 失敗した（インストール版で実測）。CC が無ければ同梱の TinyCC を明示して、環境で変わらないようにする。
+    # Triton は C コンパイラを、環境変数 CC → Visual Studio の開発者環境 → 同梱の TinyCC の順に探す。
+    # ユーザー環境変数に CC=cl.exe を持つ PC では、INCLUDE が無いまま cl.exe を呼んで失敗した
+    # （インストール版で実測、15ステップ目で停止）。この学習では CC の設定に関係なく同梱の TinyCC を使う。
     spec = importlib.util.find_spec("triton")
-    if not os.environ.get("CC") and spec is not None and spec.origin:
+    if spec is not None and spec.origin:
         tcc = Path(spec.origin).parent / "runtime" / "tcc" / "tcc.exe"
         if tcc.is_file():
             os.environ["CC"] = str(tcc)
