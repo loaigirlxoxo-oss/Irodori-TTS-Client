@@ -688,6 +688,7 @@ async function init() {
   setupDatasetTab();
   setupTrainTab();
   setupSynthSaveFolder();
+  setupMetaImport();
   // 学習は Train タブを離れても続く。生成側でも状態を持っておく。
   pollTrainingBusy();
   setInterval(pollTrainingBusy, 3000);
@@ -1292,9 +1293,123 @@ async function attachRefWav(formData) {
     const audioUrl = `file://${selectedVoice.path.replace(/\\/g, '/')}`;
     const res = await fetch(audioUrl);
     formData.append('ref_wav', await res.blob(), 'ref.wav');
+    // サーバにはファイル名が ref.wav としか届かない。wav に残す名前はこちらで渡す。
+    formData.append('voice_name', selectedVoice.name);
   } catch (err) {
     console.error('Failed to attach ref wav', err);
   }
+}
+
+// ── メタデータ読込 ──────────────────────────────────────────────
+// このアプリで作った wav には生成条件が埋まっている（wav_meta.py）。
+// それを生成タブへ戻して、同じ音をもう一度出せるようにする。
+function setupMetaImport() {
+  const zone = document.getElementById('meta-drop-zone');
+  const pick = document.getElementById('meta-select-btn');
+  if (!zone || !pick) return;
+  zone.addEventListener('dragover', (e) => { e.preventDefault(); zone.classList.add('drag-over'); });
+  zone.addEventListener('dragleave', (e) => { e.preventDefault(); zone.classList.remove('drag-over'); });
+  zone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    zone.classList.remove('drag-over');
+    const file = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (file) importWavMeta(file, file.name);
+  });
+  pick.addEventListener('click', async () => {
+    const path = await window.api.selectFile();
+    if (!path) return;
+    try {
+      const res = await fetch(`file://${path.replace(/\\/g, '/')}`);
+      await importWavMeta(await res.blob(), path.split(/[\\/]/).pop());
+    } catch (err) {
+      setMetaStatus(`読めませんでした: ${err.message || err}`, true);
+    }
+  });
+}
+
+function setMetaStatus(msg, isWarn) {
+  const el = document.getElementById('meta-status');
+  if (!el) return;
+  el.textContent = msg;
+  el.classList.toggle('warn', !!isWarn);
+}
+
+// 中身はサーバで読む。seed は 63bit で、JS の数値にすると丸められて別の音になる。
+// サーバが文字列で返すので、そのまま欄へ入れる。
+async function importWavMeta(blob, name) {
+  if (!name.toLowerCase().endsWith('.wav')) {
+    setMetaStatus('WAV を選んでください。', true);
+    return;
+  }
+  const fd = new FormData();
+  fd.append('file', blob, name);
+  try {
+    const res = await fetch(`${API_URL}/wav_meta`, { method: 'POST', body: fd });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || `status ${res.status}`);
+    const missing = applyWavMeta(json.meta);
+    setMetaStatus(['読み込みました。', ...missing].join(' '), missing.length > 0);
+  } catch (err) {
+    setMetaStatus(err.message || String(err), true);
+  }
+}
+
+// 入れる順番に意味がある。
+// - モデルの change が CFG を既定値で上書きするので、CFG はモデルの後。
+// - selectVoice が LoRA の一覧を作り直すので、LoRA はボイスの後。
+// 戻せない項目（消した LoRA・ボイス）は黙って飛ばさず、返して画面に出す。
+function applyWavMeta(m) {
+  const missing = [];
+  const setInput = (el, v) => {
+    if (!el || v == null) return;
+    el.value = v;
+    el.dispatchEvent(new Event('input'));
+  };
+
+  if (m.model_type) {
+    if ([...modelSelect.options].some(o => o.value === m.model_type)) {
+      modelSelect.value = m.model_type;
+      modelSelect.dispatchEvent(new Event('change'));
+    } else {
+      missing.push(`モデル「${m.model_type}」がありません。`);
+    }
+  }
+
+  if ('voice_name' in m) {
+    if (!m.voice_name) {
+      clearVoice();
+    } else {
+      const v = voices.find(x => x.name === m.voice_name);
+      if (v) selectVoice(v);
+      else missing.push(`参照ボイス「${m.voice_name}」がありません。`);
+    }
+  } else if (!isVoiceDesignModel(modelSelect.value)) {
+    // 参照ボイスを記録する前に作った wav
+    missing.push('参照ボイスは記録されていません。');
+  }
+
+  const mode = m.lora_name ? 'lora' : 'oneshot';
+  for (const r of condModeRadios) r.checked = (r.value === mode);
+  applyCondModeUI();
+  refreshLoraDropdown();
+  if (m.lora_name) {
+    if ([...loraSelect.options].some(o => o.value === m.lora_name)) {
+      loraSelect.value = m.lora_name;
+      loraSelect.dispatchEvent(new Event('change'));
+    } else {
+      missing.push(`LoRA「${m.lora_name}」がありません。`);
+    }
+  }
+
+  setInput(textInput, m.text);
+  if (captionInput) setInput(captionInput, m.caption || '');
+  paramSeed.value = m.seed != null ? String(m.seed) : '';
+  setInput(paramSteps, m.num_steps);
+  setInput(paramDurationScale, m.duration_scale);
+  setInput(paramCfgText, m.cfg_scale_text);
+  setInput(paramCfgSpeaker, m.cfg_scale_speaker);
+  setInput(paramCfgCaption, m.cfg_scale_caption);
+  return missing;
 }
 
 // 生成パラメータ（CFG・steps 等）は生成タブの設定を唯一の出所とする。

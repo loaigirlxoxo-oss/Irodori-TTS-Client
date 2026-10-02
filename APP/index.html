@@ -125,6 +125,22 @@
           </section>
         </div>
 
+        <!-- メタデータ読込。このアプリで作った wav に埋めた生成条件を、画面へ戻す -->
+        <div class="grp grp-card">
+          <section class="card">
+            <div class="card-hd"><span class="cap">メタデータ読込</span></div>
+            <div class="card-body">
+              <div id="meta-drop-zone" class="drop">
+                <p>WAV をここに落とす</p>
+                <div class="row">
+                  <button id="meta-select-btn" class="btn btn-ghost btn-sm"><svg class="i i-sm"><use href="#ic-folder"/></svg>選ぶ</button>
+                </div>
+              </div>
+              <span id="meta-status" class="note"></span>
+            </div>
+          </section>
+        </div>
+
         <!-- ここから下は詳細。普段は畳んでおく。
              もとは「Advanced / Expert」として 13 項目が 1 か所に並んでいたが、
              何に効くかで 4 つに分けた。id は変えていない。 -->

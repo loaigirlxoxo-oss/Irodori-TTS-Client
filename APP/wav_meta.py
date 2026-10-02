@@ -107,14 +107,20 @@ def tag_wav(path: str | Path, info: dict) -> None:
 
 
 def read_tag(path: str | Path) -> dict | None:
-    """埋めた情報を読み出す。無ければ None。
+    """埋めた情報を読み出す。無ければ None。"""
+    try:
+        return read_tag_bytes(Path(path).read_bytes())
+    except OSError:
+        return None
+
+
+def read_tag_bytes(raw: bytes) -> dict | None:
+    """read_tag の中身。画面から落とされた wav はパスが無いので、バイト列で受ける。
 
     IRDR を先に見る。無ければ ICMT を JSON として読む（要約に分ける前の
     ファイルがこの形。以前の出力も読めるようにしておく）。
     """
-    p = Path(path)
     try:
-        raw = p.read_bytes()
         if raw[:4] != b"RIFF" or raw[8:12] != b"WAVE":
             return None
         icmt: bytes | None = None

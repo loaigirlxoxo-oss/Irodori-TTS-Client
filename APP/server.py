@@ -425,6 +425,18 @@ async def get_output_file(filename: str):
         return FileResponse(path=file_path, media_type="audio/wav")
     return JSONResponse(status_code=404, content={"error": "File not found"})
 
+# 生成タブの「メタデータ読込」。wav に埋めた生成条件を返す。
+# seed は 63bit で JavaScript の数値に入らない（丸められて別の音になる）ので文字列で返す。
+@app.post("/api/v1/wav_meta")
+async def read_wav_meta(file: UploadFile = File(...)):
+    import wav_meta
+    info = wav_meta.read_tag_bytes(await file.read())
+    if not isinstance(info, dict):
+        return JSONResponse(status_code=404, content={"error": "生成条件が入っていない WAV です。"})
+    if info.get("seed") is not None:
+        info["seed"] = str(info["seed"])
+    return JSONResponse(content={"meta": info})
+
 @app.delete("/api/v1/outputs/{filename}")
 async def delete_output_file(filename: str):
     file_path = outputs_dir() / filename
@@ -604,6 +616,9 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
         temp_ref_path = None
         is_temp_file = False
         v_id = voice_id or data.get("voice_id")
+        # wav に残す参照ボイスの名前。アップロードではファイル名が ref.wav に
+        # なるので、画面が送る voice_name を使う。
+        ref_voice_name = None
 
         if ref_wav:
             # 置き場はデータ領域。相対パスだとサーバの cwd（インストール先の
@@ -615,6 +630,7 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
                 f.write(await ref_wav.read())
             temp_ref_path = Path(f.name)
             is_temp_file = True
+            ref_voice_name = str(data.get("voice_name") or "").strip() or None
         elif isinstance(data.get("ref_wav"), str) and data["ref_wav"].strip():
             # JSON でパスを渡す経路。multipart のアップロードと voice_id しか
             # 見ていなかったため、パス文字列は黙って捨てられ、参照なしとして
@@ -633,6 +649,7 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
                     "error": f"ref_wav not found: {candidate}",
                 })
             temp_ref_path = candidate
+            ref_voice_name = candidate.stem
         elif v_id:
             # Query metadata.json for the saved voice ID or name
             meta_path = voices_metadata_path()
@@ -642,6 +659,7 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
                 for v in meta.get("voices", []):
                     if v["id"] == v_id or v["name"] == v_id:
                         temp_ref_path = Path(v["path"])
+                        ref_voice_name = v["name"]
                         break
 
         # 学習中・かんたん学習中は GPU を明け渡さない。同じ GPU にベース
@@ -736,6 +754,9 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
             "text": text,
             "caption": caption or None,
             "lora_name": lora_name_raw or None,
+            # 参照なし・VoiceDesign は None。読み込み側はキーの有無で、
+            # 記録する前のファイルか「参照なしで作った」かを見分ける。
+            "voice_name": None if is_voice_design_model(model_type) else ref_voice_name,
             "num_steps": num_steps,
             "duration_scale": duration_scale,
             # CFG は音を大きく変える。これが無いと seed だけ合わせても
