@@ -2858,6 +2858,8 @@ const TR_SETTING_FIELDS = {
   valid_clips: ['tr-valid-clips', 'int'],
   seed: ['tr-seed', 'int'],
   gradient_checkpointing: ['tr-grad-ckpt', 'bool'],
+  compile_blocks: ['tr-compile', 'bool'],
+  ref_max_seconds: ['tr-ref-max', 'float'],
 };
 
 function readTrainSettings() {
@@ -2883,6 +2885,12 @@ async function loadTrainDefaults() {
     if (kind === 'bool') el.checked = !!d[key];
     else el.value = d[key];
   }
+  // 使えない環境（NVIDIA 以外・Triton なし）では選べないようにして、理由を出す
+  const compile = document.getElementById('tr-compile');
+  const note = document.getElementById('tr-compile-note');
+  compile.disabled = !d.compile_available;
+  note.textContent = d.compile_available ? '' : 'この環境では使えません（NVIDIA の GPU と Triton が必要です）。';
+  note.classList.toggle('hidden', !!d.compile_available);
 }
 const trStartBtn = () => document.getElementById('tr-start-btn');
 const trStopBtn = () => document.getElementById('tr-stop-btn');
@@ -3625,7 +3633,8 @@ async function applyAutoSetting() {
   }
   trStartStatus().textContent = `Analyzing dataset "${dataset}"…`;
   try {
-    const res = await fetch(`${API_URL}/datasets/${encodeURIComponent(dataset)}/auto_config`);
+    const q = new URLSearchParams({ base: trBase().value, compile_blocks: document.getElementById('tr-compile').checked });
+    const res = await fetch(`${API_URL}/datasets/${encodeURIComponent(dataset)}/auto_config?${q}`);
     const json = await res.json();
     if (!res.ok) {
       throw new Error(json.detail || json.error || `status ${res.status}`);
@@ -3637,6 +3646,7 @@ async function applyAutoSetting() {
     if (r.gradient_accumulation_steps != null) trGradAccum().value = r.gradient_accumulation_steps;
     // 残りの設定はベースモデルの既定に戻す（データ量で変える根拠がまだ無い）
     await loadTrainDefaults();
+    if (r.ref_max_seconds != null) document.getElementById('tr-ref-max').value = r.ref_max_seconds;
     if (r.preset) {
       trPreset().value = r.preset;
       // <select> に無い値を入れると .value は黙って空文字になり、

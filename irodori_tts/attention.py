@@ -30,11 +30,16 @@ try:  # optional dependency: flash_attn_3 prebuilt wheel installs this module
 except Exception:  # pragma: no cover - flash_attn_3 not installed
     _fa3_varlen_func = None
 
-# cuDNN handles bool-masked SDPA well on Ampere+; keep the standard fallbacks
-# behind it for shapes/dtypes it rejects.
+# Client 独自：Efficient を cuDNN より先にする。
+# 上流は cuDNN を先頭にしている（形が固定なら速い）。だが cuDNN は新しい形が
+# 来るたびに実行計画を組み直し、1回の注意計算（順伝播＋逆伝播）に約 1.2 秒
+# かかった（RTX 5080 / torch 2.10、B=4 H=16 D=128 Sq≈100 Sk≈600、実測）。
+# 同じ形なら 8.0ms、Efficient は形が変わっても 10.9ms。学習も生成も文ごとに
+# 長さが変わるので、毎回組み直しになり、v4-Large の LoRA 学習で 4サンプル
+# ごとに約 4 秒の待ちが出ていた。計算は同じ厳密な注意なので結果は変わらない。
 _SDPA_PRIORITY = [
-    SDPBackend.CUDNN_ATTENTION,
     SDPBackend.EFFICIENT_ATTENTION,
+    SDPBackend.CUDNN_ATTENTION,
     SDPBackend.MATH,
 ]
 

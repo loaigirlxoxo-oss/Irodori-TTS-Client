@@ -711,6 +711,8 @@ def _build_train_command(
     valid_clips: Optional[int] = None,
     seed: Optional[int] = None,
     gradient_checkpointing: Optional[bool] = None,
+    compile_blocks: Optional[bool] = None,
+    ref_max_seconds: Optional[float] = None,
 ) -> list[str]:
     """Build the train.py command line for a LoRA job.
 
@@ -758,12 +760,15 @@ def _build_train_command(
         ("--lr", learning_rate), ("--pretrained-text-encoder-learning-rate", text_encoder_lr),
         ("--lora-r", lora_r), ("--lora-alpha", lora_alpha), ("--lora-dropout", lora_dropout),
         ("--weight-decay", weight_decay), ("--min-lr-scale", min_lr_scale), ("--seed", seed),
+        ("--ref-max-seconds", ref_max_seconds),
     )
     for flag, value in optional:
         if value is not None:
             cmd += [flag, str(value)]
     if gradient_checkpointing is not None:
         cmd.append("--gradient-checkpointing" if gradient_checkpointing else "--no-gradient-checkpointing")
+    if compile_blocks is not None:
+        cmd.append("--compile-blocks" if compile_blocks else "--no-compile-blocks")
     return cmd
 
 
@@ -1140,7 +1145,9 @@ def _evaluate_job(job_id: str, params: dict) -> None:
         })
 
     rows = server_easy._evaluate_checkpoints(
-        job_id, ref, params["base"], int(params["max_steps"]), {}, f"tr{job_id}",
+        # 一時登録の名前に入る ID。16進のまま渡す（server_lora.is_preview_lora が16進で
+        # 見分ける。前に "tr" を付けたら一時登録と見なされず、測っただけで採用済みになった）。
+        job_id, ref, params["base"], int(params["max_steps"]), {}, job_id,
         save=save, should_stop=lambda: _was_stop_requested(job_id))
     stopped = _was_stop_requested(job_id)
     result = {"state": "stopped" if stopped else "done", "rows": rows, "ref": ref}
@@ -1182,6 +1189,11 @@ class StartJobRequest(BaseModel):
     valid_clips: Optional[int] = Field(None, ge=0, le=1000, description="0 = no validation")
     seed: Optional[int] = Field(None, ge=0, le=2**31 - 1)
     gradient_checkpointing: Optional[bool] = None
+    # ブロック単位の torch.compile（train._compile_blocks）。初回のステップでコンパイルを待つ
+    compile_blocks: Optional[bool] = None
+    # 1本ごとに付ける参照音声（同じ話者の別の音声をつないだもの）の最長秒数。
+    # 8本ずつ compile するときは 30 秒に下げないと 16GB に収まらない（実測）
+    ref_max_seconds: Optional[float] = Field(None, ge=1.0, le=120.0)
     overwrite: bool = Field(
         False,
         description="If true, delete an existing LoRA with the same name before starting",
@@ -1214,7 +1226,21 @@ class StartJobRequest(BaseModel):
 
 TRAIN_SETTING_KEYS = ("text_encoder_lr", "lora_r", "lora_alpha", "lora_dropout", "weight_decay",
                       "min_lr_scale", "warmup_pct", "decay_pct", "valid_clips", "seed",
-                      "gradient_checkpointing")
+                      "gradient_checkpointing", "compile_blocks", "ref_max_seconds")
+
+
+def compile_available() -> bool:
+    """ブロック単位の compile が使えるか（CUDA と Triton）。"""
+    import importlib.util
+
+    try:
+        import torch
+
+        if not torch.cuda.is_available() or getattr(torch.version, "hip", None):
+            return False
+    except Exception:  # noqa: BLE001
+        return False
+    return importlib.util.find_spec("triton") is not None
 
 
 @router.get("/api/v1/lora/train_defaults")
@@ -1244,12 +1270,20 @@ def train_defaults(base: str) -> JSONResponse:
         "valid_clips": _MIN_VALID_CLIPS,
         "seed": t.get("seed", 0),
         "gradient_checkpointing": bool(t.get("gradient_checkpointing", False)),
+        # 使えるのは NVIDIA の GPU と Triton があるときだけ。測ったのは v4-Large で、
+        # 既定のオンもそこだけにする（他のモデルは測っていない）。
+        "compile_blocks": base == "v4_large" and compile_available(),
+        "compile_available": compile_available(),
+        "ref_max_seconds": t.get("ref_max_seconds"),
     })
 
 
 @router.post("/api/v1/lora/jobs")
 def start_job(req: StartJobRequest) -> JSONResponse:
     global _active_job_id
+    if req.compile_blocks and not compile_available():
+        # 受けてしまうと、学習の準備まで進んでから compile で落ちる。
+        raise HTTPException(400, "学習の高速化はこの環境では使えません（NVIDIA の GPU と Triton が必要です）。")
     if req.base not in BASE_CONFIGS:
         raise HTTPException(400, f"base must be one of {list(BASE_CONFIGS)}")
     if req.preset not in PRESETS:

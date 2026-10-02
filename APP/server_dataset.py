@@ -537,14 +537,22 @@ def _round_to_nice(value: int, base: int) -> int:
     return max(base, int(round(value / base) * base))
 
 
-def _vram_batch() -> tuple[int, int]:
+def _vram_batch(base: str = "", compile_blocks: bool = False) -> tuple[int, int]:
+    """VRAM に合わせたバッチ（実効 32）。v4-Large をブロック単位で compile するときは
+    16GB 級で 8本×4回が収まり、4本×8回の倍近く速い（実測 1.6〜2.0秒/ステップ）。"""
     from server_easy import _train_batch_size  # lazily: server_easy imports this module
 
-    return _train_batch_size()
+    batch, accum = _train_batch_size()
+    if compile_blocks and base == "v4_large" and (batch, accum) == (4, 8):
+        from server_train import compile_available  # lazily: avoids an import cycle at load
+
+        if compile_available():
+            return 8, 4
+    return batch, accum
 
 
 @router.get("/api/v1/datasets/{name}/auto_config")
-def auto_config(name: str) -> JSONResponse:
+def auto_config(name: str, base: str = "", compile_blocks: bool = False) -> JSONResponse:
     """Suggest training parameters for a dataset.
 
     Returns analysis (num_clips, avg_duration, total_duration) plus a
@@ -629,7 +637,9 @@ def auto_config(name: str) -> JSONResponse:
             "log_every": int(log_every),
             "preset": preset,
             # VRAM に合わせたバッチ。かんたん学習と同じ決め方（実効 32 で揃える）
-            **dict(zip(("batch_size", "gradient_accumulation_steps"), _vram_batch())),
+            **dict(zip(("batch_size", "gradient_accumulation_steps"), _vram_batch(base, compile_blocks))),
+            # 8本ずつ compile するときは参照音声を 30 秒までにする（120 秒のままだと 16GB を超える。実測）
+            **({"ref_max_seconds": 30.0} if _vram_batch(base, compile_blocks) == (8, 4) else {}),
             # 何を根拠に出した数字かを返す。クリップ数ではなく尺で決めている
             # ことが分からないと、同じ本数で違う値が出た理由が伝わらない。
             "basis": "duration",

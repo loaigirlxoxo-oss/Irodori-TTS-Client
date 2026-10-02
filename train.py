@@ -1869,6 +1869,59 @@ def resolve_dist_env() -> tuple[int, int, int]:
     return rank, world_size, local_rank
 
 
+def _compile_blocks(raw_model, train_cfg, is_main_process: bool) -> None:
+    """Client 独自：DiT と話者の読み取り部分のブロックを1つずつ torch.compile する。
+
+    学習は GPU が計算するより、小さな計算を頼む回数（1ステップ約14万回）と Python
+    の実行で詰まっていた（v4-Large・RTX 5080 で GPU の計算 2.1秒に対し1ステップ7秒）。
+    ブロック単位でまとめると頼む回数が減り、途中のメモリも減って8本ずつが 16GB に
+    収まった。実測（コハル200本・32本/ステップ）：4本×8回 5.4秒 → 8本×4回 1.6〜2.0秒。
+
+    - CPU 向けの C++ 生成は止める。MSVC の無い PC でも、Triton 同梱の TinyCC だけで動く
+      （CPU 側の小さな演算は通常どおり実行される）。止めると約0.4秒遅くなる（実測）。
+    - 勾配チェックポイントの再計算などで作り直しが起きる（実測11回）。既定の上限8回だと
+      上限を超えた形がコンパイルなしで動くので、上限を上げる。
+    - モデル全体の compile（--compile-model）は CPU 側まで巻き込んで MSVC が要り、
+      int8 量子化した重みとは作り直しが止まらなかった（1ステップ14.8秒）。
+    """
+    import importlib
+
+    importlib.import_module("torch._inductor.config").disable_cpp_codegen = True
+    dynamo = importlib.import_module("torch._dynamo")
+    dynamo.config.recompile_limit = int(train_cfg.compile_recompile_limit)
+    dynamo.config.accumulated_recompile_limit = max(int(train_cfg.compile_recompile_limit) * 64, 256)
+    base = raw_model.get_base_model() if hasattr(raw_model, "get_base_model") else raw_model
+    targets = list(base.blocks)
+    speaker = getattr(base, "speaker_encoder", None)
+    if speaker is not None and hasattr(speaker, "blocks"):
+        targets += list(speaker.blocks)
+    for block in targets:
+        block.compile(dynamic=True)
+    if is_main_process:
+        print(f"torch.compile per block: {len(targets)} blocks (first steps include compilation).",
+              flush=True)
+
+
+def _cap_vram(device: torch.device) -> None:
+    """Client 独自：VRAM を使い切ったら、共有メモリへ逃がさず OOM で止める。
+
+    Windows のドライバは VRAM が足りないと本体のメモリへ黙って退避する。そうなると学習は
+    止まらずに 9 倍以上遅くなり、本体の RAM まで使い切って PC 全体が重くなった（実測）。
+    PyTorch の確保をこの割合までに抑え、溢れる設定はその場で失敗させる。
+    IRODORI_VRAM_FRACTION=0 で外す。
+    """
+    if device.type != "cuda" or not torch.cuda.is_available():
+        return
+    fraction = float(os.environ.get("IRODORI_VRAM_FRACTION", "0.95") or 0)
+    if fraction <= 0:
+        return
+    index = device.index if device.index is not None else torch.cuda.current_device()
+    torch.cuda.set_per_process_memory_fraction(min(fraction, 1.0), index)
+    total = torch.cuda.get_device_properties(index).total_memory / 2**30
+    print(f"VRAM cap: {fraction:.2f} of {total:.1f} GB (overflow fails instead of spilling to system RAM).",
+          flush=True)
+
+
 def setup_distributed(device_arg: str) -> tuple[int, int, int, bool, torch.device]:
     rank, world_size, local_rank = resolve_dist_env()
     distributed = world_size > 1
@@ -2597,6 +2650,182 @@ def run_validation(
     return metrics
 
 
+def build_condition_state_cache(
+    *,
+    base_model,
+    datasets: list,
+    collator,
+    device: torch.device,
+    use_bf16: bool,
+    text_pad_id: int,
+    caption_pad_id: int,
+    verify_batches: int = 0,
+):
+    """Client 独自：読み取り結果の使い回し（model.ConditionStateCache）を作る。
+
+    学習と同じ collator でトークン化し、学習と同じ autocast で、行ごとに2通り
+    （元のマスク／全部 False のマスク）を固定長で計算する。verify_batches > 0 なら、
+    いまの計算と使い回しの結果を実際のバッチで比べて差を出す。
+    """
+    from torch.utils.data import DataLoader as _DL
+
+    from irodori_tts.model import ConditionStateCache
+
+    cache = ConditionStateCache({"text": text_pad_id, "caption": caption_pad_id})
+    use_caption = bool(base_model.cfg.use_caption_condition)
+    rows: dict[str, dict[tuple, tuple[torch.Tensor, torch.Tensor]]] = {"text": {}, "caption": {}}
+    max_len = {"text": 0, "caption": 0}
+    for dataset in datasets:
+        if dataset is None:
+            continue
+        loader = _DL(dataset, batch_size=16, shuffle=False, num_workers=0, collate_fn=collator)
+        for batch in loader:
+            kinds = [("text", batch["text_ids"], batch["text_mask"])]
+            if use_caption:
+                kinds.append(("caption", batch["caption_ids"], batch["caption_mask"]))
+            for kind, ids, mask in kinds:
+                pad_id = cache.pad_ids[kind]
+                max_len[kind] = max(max_len[kind], int(ids.shape[1]))
+                for i in range(ids.shape[0]):
+                    n = int(mask[i].sum().item())
+                    key = ConditionStateCache.make_key(ids[i], n, pad_id)
+                    rows[kind].setdefault(key, (ids[i].clone(), mask[i].clone()))
+
+    # 行ごと・2通り（元のマスク／全部 False）を最長の長さで持つので、件数が多いと
+    # 学習の前にメモリを使い切る（1万件・最長256で十数GB）。見積もりが上限を超えたら
+    # 使い回しをやめ、これまでどおり毎回計算する。上限は IRODORI_CONDITION_CACHE_MAX_GB。
+    dims = {"text": int(base_model.cfg.text_dim),
+            "caption": int(base_model.cfg.caption_dim or base_model.cfg.text_dim)}
+    estimate = sum(len(rows[k]) * max_len[k] * dims[k] * 2 * 2 for k in rows)  # bf16, 2 states
+    budget = float(os.environ.get("IRODORI_CONDITION_CACHE_MAX_GB", "4")) * 2**30
+    if estimate > budget:
+        print(f"Condition state cache skipped: needs about {estimate / 2**30:.1f} GB "
+              f"(limit {budget / 2**30:.1f} GB).", flush=True)
+        return None
+
+    backbone = base_model.pretrained_text_backbone
+    encoders = {"text": base_model.text_encoder}
+    if use_caption:
+        encoders["caption"] = base_model.caption_encoder
+    autocast = (
+        torch.autocast(device_type="cuda", dtype=torch.bfloat16) if use_bf16 else nullcontext()
+    )
+    with torch.no_grad(), autocast:
+        for kind, table in rows.items():
+            if not table:
+                continue
+            length = max_len[kind]
+            pad_id = cache.pad_ids[kind]
+            items = list(table.items())
+            for start in range(0, len(items), 32):
+                chunk = items[start : start + 32]
+                ids = torch.full((len(chunk), length), pad_id, dtype=torch.long)
+                norm = torch.zeros((len(chunk), length), dtype=torch.bool)
+                for j, (_, (row_ids, row_mask)) in enumerate(chunk):
+                    ids[j, : row_ids.shape[0]] = row_ids
+                    norm[j, : row_mask.shape[0]] = row_mask
+                ids = ids.to(device)
+                norm = norm.to(device)
+                drop = torch.zeros_like(norm)
+                out_norm = encoders[kind](backbone, ids, norm).detach().cpu()
+                out_drop = encoders[kind](backbone, ids, drop).detach().cpu()
+                for j, (key, _) in enumerate(chunk):
+                    cache.store[kind][key] = {"norm": out_norm[j], "drop": out_drop[j]}
+
+    if verify_batches > 0:
+        _verify_condition_state_cache(
+            base_model=base_model,
+            cache=cache,
+            dataset=next(d for d in datasets if d is not None),
+            collator=collator,
+            device=device,
+            autocast_factory=(
+                (lambda: torch.autocast(device_type="cuda", dtype=torch.bfloat16))
+                if use_bf16
+                else nullcontext
+            ),
+            batches=verify_batches,
+        )
+    return cache
+
+
+def _has_multi_caption(datasets: list) -> bool:
+    """説明文（caption）の候補を複数持つ行があるか。あれば読み取り結果を使い回せない。"""
+    from irodori_tts.dataset import _caption_candidates
+
+    for dataset in datasets:
+        if dataset is None:
+            continue
+        for i in range(len(dataset.manifest_index.offsets)):
+            if len(_caption_candidates(dataset._read_item_by_sample_index(i).get("caption"))) > 1:
+                return True
+    return False
+
+
+def _close_dataset_files(datasets: list) -> None:
+    """本体のプロセスで読んだデータセットの、開いたままのマニフェストを閉じる。
+
+    Windows は DataLoader の係を spawn で起こし、データセットを pickle して渡す。
+    開いたファイルは渡せず、学習が起動直後に落ちた（TypeError: cannot pickle '_io.TextIOWrapper'）。
+    閉じておけば、係のほうで必要になったときに開き直す（_manifest_file）。
+    """
+    for dataset in datasets:
+        fp = getattr(dataset, "_manifest_fp", None)
+        if fp is not None:
+            fp.close()
+            dataset._manifest_fp = None
+
+
+def _verify_condition_state_cache(
+    *, base_model, cache, dataset, collator, device, autocast_factory, batches: int
+) -> None:
+    """いまの計算と、使い回しの結果の差を、実際のバッチ（文を隠す行も含む）で測って出す。"""
+    from torch.utils.data import DataLoader as _DL
+
+    loader = _DL(dataset, batch_size=4, shuffle=True, num_workers=0, collate_fn=collator)
+    worst = {"text": 0.0, "caption": 0.0}
+    generator = torch.Generator().manual_seed(0)
+    for b, batch in enumerate(loader):
+        if b >= batches:
+            break
+        ids = batch["text_ids"].to(device)
+        mask = batch["text_mask"].to(device)
+        size = ids.shape[0]
+        text_drop = (torch.rand(size, generator=generator) < 0.5).to(device)
+        kwargs = {}
+        if base_model.cfg.use_caption_condition:
+            kwargs = {
+                "caption_input_ids": batch["caption_ids"].to(device),
+                "caption_mask": batch["caption_mask"].to(device),
+                "caption_condition_dropout": (torch.rand(size, generator=generator) < 0.5).to(device),
+            }
+        ref = batch.get("ref_latent_patched")
+        ref_mask = batch.get("ref_latent_mask_patched")
+        ref = ref.to(device) if ref is not None else None
+        ref_mask = ref_mask.to(device) if ref_mask is not None else None
+        results = []
+        for use_cache in (False, True):
+            base_model.condition_state_cache = cache if use_cache else None
+            with torch.no_grad(), autocast_factory():
+                out = base_model.encode_conditions(
+                    ids, mask, ref, ref_mask, text_condition_dropout=text_drop, **kwargs
+                )
+            results.append(out)
+        base_model.condition_state_cache = None
+        live, cached = results
+        worst["text"] = max(worst["text"], float((live[0].float() - cached[0].float()).abs().max()))
+        if live[4] is not None:
+            worst["caption"] = max(
+                worst["caption"], float((live[4].float() - cached[4].float()).abs().max())
+            )
+        same_masks = bool(torch.equal(live[1], cached[1]))
+        print(
+            f"[condition cache verify] batch {b}: text max|diff|={worst['text']:.3e} "
+            f"caption max|diff|={worst['caption']:.3e} masks_equal={same_masks}",
+            flush=True,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Train Irodori-TTS.")
     parser.add_argument(
@@ -2633,6 +2862,13 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=None,
         help="Enable torch.compile for the training model.",
+    )
+    parser.add_argument(
+        "--compile-blocks",
+        dest="compile_blocks",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Client: torch.compile the diffusion and speaker-encoder blocks one by one.",
     )
     parser.add_argument(
         "--gradient-checkpointing",
@@ -2989,6 +3225,7 @@ def main() -> None:
         )
 
     rank, world_size, local_rank, distributed, device = setup_distributed(args.device)
+    _cap_vram(device)
     is_main_process = rank == 0
 
     raw_argv = sys.argv[1:]
@@ -3016,6 +3253,8 @@ def main() -> None:
         train_cfg = replace(train_cfg, allow_tf32=args.allow_tf32)
     if args.compile_model is not None:
         train_cfg = replace(train_cfg, compile_model=args.compile_model)
+    if args.compile_blocks is not None:
+        train_cfg = replace(train_cfg, compile_blocks=args.compile_blocks)
     if args.gradient_checkpointing is not None:
         train_cfg = replace(train_cfg, gradient_checkpointing=args.gradient_checkpointing)
     if cli_provided(raw_argv, "--train-mode"):
@@ -4247,6 +4486,61 @@ def main() -> None:
             torch.cuda.empty_cache()
         if is_main_process:
             print(f"Frozen base weights cast to bf16: {cast:,} params.")
+    if (
+        train_config_uses_lora(train_cfg)
+        and train_cfg.lora_cache_condition_states
+    ):
+        # Client 独自：文章の読み取り結果を先に計算して使い回し、読み取り部分を GPU から降ろす。
+        base_model = raw_model.get_base_model() if hasattr(raw_model, "get_base_model") else raw_model
+        condition_cache = None
+        # 読み取り部分のどこかを学習するなら使い回せない（学習範囲「全体」など）。
+        # 結果を固定すると、その部分の LoRA が勾配を受けず何も学ばない。
+        trains_reader = any(
+            p.requires_grad
+            for name in ("text_encoder", "caption_encoder", "pretrained_text_backbone")
+            if getattr(base_model, name, None) is not None
+            for p in getattr(base_model, name).parameters()
+        )
+        if base_model.pretrained_text_backbone is None:
+            if is_main_process:
+                print("Condition state cache skipped: no pretrained text backbone.")
+        elif trains_reader:
+            if is_main_process:
+                print("Condition state cache skipped: the text reader has trainable parameters.")
+        elif distributed:
+            # 読み取り部分だけ CPU に降ろすと、モデルが CPU と GPU に分かれ、DDP が起動時に落ちる。
+            if is_main_process:
+                print("Condition state cache skipped: distributed training keeps the reader on GPU.")
+        elif _has_multi_caption([train_dataset, valid_dataset]):
+            # 説明文の候補が複数あると、学習中に毎回ちがう候補が選ばれ、作っておいた結果に無い
+            # 組み合わせが来る（キャッシュに無いと止まる）。
+            if is_main_process:
+                print("Condition state cache skipped: some records have several caption candidates.")
+        else:
+            verify = int(os.environ.get("IRODORI_VERIFY_CONDITION_CACHE", "0") or 0)
+            caption_pad = (caption_tokenizer or tokenizer).pad_token_id
+            condition_cache = build_condition_state_cache(
+                base_model=base_model,
+                datasets=[train_dataset, valid_dataset],
+                collator=collator,
+                device=device,
+                use_bf16=use_bf16,
+                text_pad_id=tokenizer.pad_token_id,
+                caption_pad_id=caption_pad,
+                verify_batches=verify,
+            )
+            _close_dataset_files([train_dataset, valid_dataset])
+        if condition_cache is not None:
+            base_model.condition_state_cache = condition_cache
+            base_model.pretrained_text_backbone.to("cpu")
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+            if is_main_process:
+                sizes = {k: len(v) for k, v in condition_cache.store.items()}
+                print(f"Condition state cache built: {sizes}; text backbone moved to CPU.")
+            if verify:
+                print("IRODORI_VERIFY_CONDITION_CACHE is set: stopping after the check.")
+                return
     if train_cfg.speaker_inversion_enabled:
         init_embedding = None
         if train_cfg.speaker_inversion_init_embedding is not None:
@@ -4329,6 +4623,8 @@ def main() -> None:
         if meanflow_mode and raw_model.pretrained_text_backbone is not None:
             raw_model.pretrained_text_backbone.set_gradient_checkpointing(False)
     train_model = raw_model
+    if train_cfg.compile_blocks:
+        _compile_blocks(raw_model, train_cfg, is_main_process)
     if train_cfg.compile_model:
         if not hasattr(torch, "compile"):
             raise RuntimeError("compile_model=True requires torch.compile (PyTorch 2+).")

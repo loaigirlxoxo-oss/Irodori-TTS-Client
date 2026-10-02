@@ -203,7 +203,8 @@ function torchPlan(backend) {
       // torch 系を requirements から外す。
       // torchcodec は torch の ABI に合わせた作りで ROCm 版が無いが、
       // 読み書きは soundfile へ落ちる（irodori_tts/codec.py）。
-      drop: ['torch', 'torchaudio', 'torchcodec'],
+      // Triton は CUDA 専用（学習の高速化に使う）。Radeon では使えないので入れない。
+      drop: ['torch', 'torchaudio', 'torchcodec', 'triton-windows'],
     };
   }
   const version = backend === 'cpu' ? '2.10.0' : `2.10.0+${backend}`;
@@ -215,7 +216,8 @@ function torchPlan(backend) {
     pins: [`torch==${version}`, `torchaudio==${version}`],
     // cu128 / cu126 / cpu は requirements の torch>=2.10.0 を満たすので外さない。
     // 版は constraints で固定し、別の依存が引き上げるのを止める。
-    drop: [],
+    // Triton は CUDA 専用（学習の高速化に使う）。CPU では使えないので入れない。
+    drop: backend === 'cpu' ? ['triton-windows'] : [],
   };
 }
 

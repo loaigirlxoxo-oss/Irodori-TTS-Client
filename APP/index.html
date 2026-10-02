@@ -747,6 +747,12 @@
                     </div>
                   </div>
                   <label class="chk" title="VRAM を減らす代わりに遅くなる"><input type="checkbox" id="tr-grad-ckpt"> 勾配チェックポイント（VRAM を減らす・遅くなる）</label>
+                  <label class="chk" title="計算をまとめて学習を速くする。最初の数ステップでコンパイルに数分かかる"><input type="checkbox" id="tr-compile"> 学習を速くする（最初にコンパイルで数分待つ）</label>
+                  <p id="tr-compile-note" class="note hidden"></p>
+                  <div class="param-group">
+                    <label for="tr-ref-max">参照音声の上限 <span class="en">秒</span></label>
+                    <input type="number" id="tr-ref-max" step="1" min="1" max="120" title="学習で1本ごとに付ける参照音声（同じ声の別の音声をつないだもの）の最長。短いほど VRAM を使わない">
+                  </div>
 
                   <div class="ds-opt-hd">LoRA</div>
                   <div class="two">

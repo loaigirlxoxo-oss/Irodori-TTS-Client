@@ -74,6 +74,8 @@ v4-Large は文章の読み取り部分が `google/t5gemma-2-1b-1b` 由来のた
 `requirements.txt` に書かれた依存（PyTorch ほか）を、同梱の pip が PyPI から取得します。
 AMD (Radeon) を選んだ場合は、AMD が配布する Windows 向け PyTorch を
 `repo.radeon.com` から取得します。いずれも本アプリは再配布していません。
+学習の高速化に使う `triton-windows`（MIT。C コンパイラとして TinyCC〔LGPL-2.1〕を同梱）も、
+NVIDIA の GPU の環境で同じように PyPI から取得します。
 
 ### 任意で追加できるモデル
 

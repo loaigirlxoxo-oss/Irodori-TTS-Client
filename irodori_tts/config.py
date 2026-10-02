@@ -143,6 +143,9 @@ class TrainConfig:
     latent_length_bucket_size: int = 0
     allow_tf32: bool = False
     compile_model: bool = False
+    # Client 独自：DiT と話者の読み取り部分をブロック単位で torch.compile する（train._compile_blocks）
+    compile_blocks: bool = False
+    compile_recompile_limit: int = 64
     gradient_checkpointing: bool = False
     # Keep activations (skip checkpointing) for one out of every N diffusion
     # blocks to trade memory for less recompute in backward. 0 disables the
@@ -247,6 +250,9 @@ class TrainConfig:
     # v4-Large（3.29B）は fp32 のままだと元の重みだけで 13.2GB あり、16GB の GPU で
     # 溢れて 1 ステップも進まなかった。学習する LoRA の重みは fp32 のまま。
     lora_frozen_base_bf16: bool = False
+    # Client 独自：LoRA 学習で、固定の文章読み取り部分の結果を学習前に1回だけ計算して
+    # 使い回し、読み取り部分を GPU から降ろす（model.ConditionStateCache）。
+    lora_cache_condition_states: bool = False
     seed: int = 0
 
 

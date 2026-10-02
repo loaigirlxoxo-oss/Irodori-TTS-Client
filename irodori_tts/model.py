@@ -1452,6 +1452,54 @@ class DurationPredictor(nn.Module):
         return self.out_proj(self.out_norm(h)).squeeze(-1)
 
 
+class ConditionStateCache:
+    """Client 独自：文章（と説明文）の読み取り結果を、学習の前に計算して取っておく入れ物。
+
+    LoRA 学習では文章の読み取り部分（v4-Large は T5Gemma、約10億パラメータ）が固定で、
+    毎回同じ計算をしている。1回だけ計算して使い回し、読み取り部分を GPU から降ろす
+    （VRAM が約2GB 空き、溢れて遅くなるのを防ぐ）。
+
+    行ごとに「元のマスクの長さ n と、末尾の詰め物を除いたトークン列」を鍵にする。
+    学習中に文を隠す（condition dropout）行は、マスクを全部 False にして計算した結果を
+    別に持つ。どちらも、学習と同じ固定長 L に詰め物をして計算し、使うときにバッチの
+    長さ P まで切る。詰め物の位置はマスクで注意から外れるので、長さで値は変わらない
+    （train.py の確認で一致を測る）。
+    """
+
+    def __init__(self, pad_ids: dict[str, int]) -> None:
+        self.pad_ids = dict(pad_ids)
+        self.store: dict[str, dict[tuple, dict[str, torch.Tensor]]] = {"text": {}, "caption": {}}
+
+    @staticmethod
+    def make_key(ids_row: torch.Tensor, n: int, pad_id: int) -> tuple:
+        row = ids_row.tolist()
+        while row and row[-1] == pad_id:
+            row.pop()
+        return (int(n), tuple(row))
+
+    def lookup(
+        self,
+        kind: str,
+        ids: torch.Tensor,
+        orig_mask: torch.Tensor,
+        mask: torch.Tensor,
+    ) -> torch.Tensor:
+        pad_id = self.pad_ids[kind]
+        length = ids.shape[1]
+        rows = []
+        for i in range(ids.shape[0]):
+            n = int(orig_mask[i].sum().item())
+            entry = self.store[kind].get(self.make_key(ids[i], n, pad_id))
+            if entry is None:
+                raise KeyError(
+                    f"condition cache miss ({kind}): n={n}. "
+                    "Build the cache from every dataset the run reads."
+                )
+            dropped = n > 0 and not bool(mask[i].any().item())
+            rows.append(entry["drop" if dropped else "norm"][:length])
+        return torch.stack(rows).to(device=ids.device, non_blocking=True)
+
+
 class TextToLatentRFDiT(nn.Module):
     """
     Text + reference-latent conditioned RF diffusion model over patched DACVAE latent sequences.
@@ -1469,6 +1517,8 @@ class TextToLatentRFDiT(nn.Module):
     ):
         super().__init__()
         self.cfg = cfg
+        # Client 独自：学習時だけ使う、読み取り結果の使い回し（ConditionStateCache）
+        self.condition_state_cache: ConditionStateCache | None = None
         self.pretrained_text_backbone = None
         if cfg.use_pretrained_text_encoder:
             self.pretrained_text_backbone = PretrainedTextBackbone(
@@ -1787,9 +1837,11 @@ class TextToLatentRFDiT(nn.Module):
         torch.Tensor | None,
         torch.Tensor | None,
     ]:
+        orig_text_mask = text_mask
         if text_condition_dropout is not None:
             text_mask = text_mask.clone()
             text_mask[text_condition_dropout] = False
+        orig_caption_mask = caption_mask
         if self.cfg.use_speaker_condition_resolved:
             speaker_inversion = getattr(self, "speaker_inversion", None)
             has_direct_speaker = speaker_state_override is not None or isinstance(
@@ -1822,7 +1874,10 @@ class TextToLatentRFDiT(nn.Module):
                 caption_mask = caption_mask.clone()
                 caption_mask[caption_condition_dropout] = False
 
-        if self.pretrained_text_backbone is None:
+        cache = self.condition_state_cache
+        if cache is not None:
+            text_state = cache.lookup("text", text_input_ids, orig_text_mask, text_mask)
+        elif self.pretrained_text_backbone is None:
             text_state = self.text_encoder(text_input_ids, text_mask)
         else:
             text_state = self.text_encoder(self.pretrained_text_backbone, text_input_ids, text_mask)
@@ -1865,7 +1920,11 @@ class TextToLatentRFDiT(nn.Module):
             )
         caption_state = None
         if self.cfg.use_caption_condition:
-            if self.pretrained_text_backbone is None:
+            if cache is not None:
+                caption_state = cache.lookup(
+                    "caption", caption_input_ids, orig_caption_mask, caption_mask
+                )
+            elif self.pretrained_text_backbone is None:
                 caption_state = self.caption_encoder(caption_input_ids, caption_mask)
             else:
                 caption_state = self.caption_encoder(

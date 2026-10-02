@@ -124,4 +124,6 @@ train:
   lora_modules_to_save: auto
   # 固定の元の重みを bf16 で持つ（Client 独自）。fp32 では 16GB に載らなかった
   lora_frozen_base_bf16: true
+  # 文章の読み取り部分（T5Gemma）の結果を先に計算して使い回し、GPU から降ろす（Client 独自）
+  lora_cache_condition_states: true
   seed: 0
