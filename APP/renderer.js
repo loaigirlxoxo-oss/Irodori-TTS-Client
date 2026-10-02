@@ -1397,7 +1397,12 @@ function applyWavMeta(m) {
       loraSelect.value = m.lora_name;
       loraSelect.dispatchEvent(new Event('change'));
     } else {
+      // 先頭の LoRA が選ばれたままだと、気づかずに別の声で鳴らしてしまう。
+      // 未選択にしておけば、生成は「LoRA を選ぶか…」で止まる。
+      loraSelect.selectedIndex = -1;
+      loraSelect.dispatchEvent(new Event('change'));
       missing.push(`LoRA「${m.lora_name}」がありません。`);
+      showGenMessage(`LoRA「${m.lora_name}」がありません。LoRA を選び直してください。`, true);
     }
   }
 
