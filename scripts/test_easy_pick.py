@@ -23,9 +23,9 @@ def test_early_checkpoint_can_win() -> None:
 
 
 def test_misreads_outweigh_small_similarity_gain() -> None:
-    """読み間違いが5ポイント多ければ、似ている度が 0.02 高くても負ける。"""
+    """読み間違いが10ポイント多ければ、似ている度が 0.02 高く学習が進んでいても負ける。"""
     a = {"name": "a", "step": 100, "sim": 0.50, "cer": 0.05}
-    b = {"name": "b", "step": 200, "sim": 0.52, "cer": 0.10}
+    b = {"name": "b", "step": 200, "sim": 0.52, "cer": 0.15}
     assert combined_score(a) > combined_score(b)
     assert pick_by_score([a, b])["name"] == "a"
 
@@ -34,6 +34,14 @@ def test_similarity_decides_when_misreads_are_close() -> None:
     a = {"name": "a", "step": 100, "sim": 0.50, "cer": 0.050}
     b = {"name": "b", "step": 200, "sim": 0.53, "cer": 0.055}
     assert pick_by_score([a, b])["name"] == "b"
+
+
+def test_within_band_later_step_wins() -> None:
+    """最高点から SCORE_BAND 以内なら、学習が進んだほうを選ぶ（コハル B の 300 と 1500）。"""
+    rows = [{"name": "s300", "step": 300, "sim": 0.5688, "cer": 0.046},
+            {"name": "s800", "step": 800, "sim": 0.4751, "cer": 0.044},
+            {"name": "s1500", "step": 1500, "sim": 0.5560, "cer": 0.030}]
+    assert pick_by_score(rows)["name"] == "s1500"
 
 
 def test_tie_goes_to_later_step() -> None:
@@ -54,6 +62,7 @@ if __name__ == "__main__":
     test_early_checkpoint_can_win()
     test_misreads_outweigh_small_similarity_gain()
     test_similarity_decides_when_misreads_are_close()
+    test_within_band_later_step_wins()
     test_tie_goes_to_later_step()
     test_empty_raises()
     print("OK")

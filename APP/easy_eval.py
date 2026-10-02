@@ -305,16 +305,23 @@ def combined_score(row: dict) -> float:
     return row["sim"] - CER_WEIGHT * row["cer"]
 
 
+# 点数がこの幅の中なら同等とみなし、学習が進んだほうを選ぶ。評価文14本では
+# ステップ間の点数が 0.45〜0.55 で上下し、コハルの B では 300（0.546）と 1500（0.541）
+# の差 0.005 で 300 が選ばれたが、耳で良かったのは 1500 だった（2026-10-02、A・B の2本で決めた目安）。
+SCORE_BAND = 0.01
+
+
 def pick_by_score(rows: list[dict]) -> dict:
     """採用するチェックポイント（かんたん学習）とおすすめ（学習タブ）。
 
-    全チェックポイントから、似ている度と読み間違いを合わせた点数が最も高いもの。
-    同点なら学習が進んだほう。以前は総ステップの60%未満を見なかったが、
-    学習を通して一番良かったのが前半ということがある（コハルは 1300 中 500）。
+    全チェックポイントの点数（似ている度と読み間違いを合わせたもの）を見て、最高点から
+    SCORE_BAND 以内のうち、学習が最も進んだものを選ぶ。前半だけを外す規則は使わない。
     """
     if not rows:
         raise ValueError("評価できるチェックポイントがありません")
-    best = max(rows, key=lambda r: (combined_score(r), r["step"]))
+    top = max(combined_score(r) for r in rows)
+    near = [r for r in rows if combined_score(r) >= top - SCORE_BAND]
+    best = max(near, key=lambda r: r["step"])
     return dict(best, score=combined_score(best), fallback=False)
 
 

@@ -321,11 +321,12 @@ def _resolve_wav(path_or_url: str) -> Path:
     return Path(path_or_url)
 
 
-def _synthesize_one(text: str, ref_wav: str, model_type: str,
+def _synthesize_one(text: str, ref_wav: str | None, model_type: str,
                     lora: str | None = None, seed: int | None = None) -> str:
-    """1本合成して、出力 wav の絶対パスを返す。"""
-    payload: dict = {"text": text, "model_type": model_type, "ref_wav": ref_wav,
-                     "easy_token": INTERNAL_TOKEN}
+    """1本合成して、出力 wav の絶対パスを返す。ref_wav が None なら参照なしで読む。"""
+    payload: dict = {"text": text, "model_type": model_type, "easy_token": INTERNAL_TOKEN}
+    if ref_wav:
+        payload["ref_wav"] = ref_wav
     if lora:
         payload["lora_name"] = lora
     if seed is not None:
@@ -341,6 +342,16 @@ def _synthesize_one(text: str, ref_wav: str, model_type: str,
     return str(_resolve_wav(result["results"][0]))
 
 
+# 読み方の指示に使う絵文字（行頭のタグと、文中に差し込んだタグ）。生成のときは
+# 本文と一緒に渡すが、学習データの文には残さない（2026-10-01 決定）。
+_STYLE_TAG_RE = re.compile(r"[🀀-🫿☀-♤♦-➿⏩-⏿️‍]")
+
+
+def strip_style_tags(text: str) -> str:
+    """読み方の指示の絵文字を外す。♥（U+2665）は台詞の表記なので残す。"""
+    return _STYLE_TAG_RE.sub("", text).strip()
+
+
 def _run_generate(job_id: str, req: GenerateRequest) -> None:
     status = _read_status(job_id) or {}
     try:
@@ -352,7 +363,7 @@ def _run_generate(job_id: str, req: GenerateRequest) -> None:
 
         for tag, body in rows:
             path = _synthesize_one(f"{tag} {body}", req.ref_wav, req.model_type)
-            status["clips"].append({"path": path, "text": body, "tag": tag})
+            status["clips"].append({"path": path, "text": strip_style_tags(body), "tag": tag})
             status["done"] = len(status["clips"])
             _write_status(job_id, status)
 
@@ -1208,7 +1219,10 @@ def _measure(targets, eval_lines, job_id: str, ref_wav: str, base: str,
         # ECAPA・書き起こしが同時に載って 13.5GB まで伸びた（実測）。
         # まとめて鳴らしてから合成を返し、それから測る。
         # 乱数は本ごとに固定し、どのチェックポイントにも同じ値を渡す。
-        wavs = [(_synthesize_one(f"{tag} {body}", ref_wav, base, lora=preview, seed=eval_seed(i)), tag, body)
+        # 参照の声は渡さない（LoRA だけで読ませる）。参照を渡すと浅いチェックポイントでも
+        # 声が寄り、コハルの学習で耳の評価（1500）と逆にステップ100〜300が選ばれた。
+        # 似ている度は、これまでどおり ref_wav と比べる。
+        wavs = [(_synthesize_one(f"{tag} {body}", None, base, lora=preview, seed=eval_seed(i)), tag, body)
                 for i, (tag, body) in enumerate(eval_lines)]
         made_wavs.extend(w for w, _, _ in wavs)
         if not release_runtime():
