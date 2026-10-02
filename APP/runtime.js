@@ -346,6 +346,20 @@ function run(exe, args, opts, onLine) {
   });
 }
 
+// 学習の高速化（Triton）が使う C の開発用ファイル。1.2.2 より前に入れたランタイムには無いので、
+// 起動のたびに見て、足りなければ同梱の Python から写す。ランタイム全体は作り直さない
+// （作り直すとライブラリの入れ直しで数分〜十数分かかる）。
+function ensurePythonDevFiles({ dataRoot, isPackaged }) {
+  const src = bundledPython(isPackaged);
+  const dest = runtimeDir(dataRoot);
+  if (!fs.existsSync(path.join(dest, 'python.exe'))) return;
+  for (const name of ['include', 'libs']) {
+    if (fs.existsSync(path.join(src, name)) && !fs.existsSync(path.join(dest, name))) {
+      copyDir(path.join(src, name), path.join(dest, name));
+    }
+  }
+}
+
 function copyDir(src, dest) {
   fs.mkdirSync(dest, { recursive: true });
   for (const ent of fs.readdirSync(src, { withFileTypes: true })) {
@@ -467,5 +481,5 @@ module.exports = {
   ensureRuntime, ensurePathFix, isReady, runtimePython, modelsDir,
   // torchPlan は「どの wheel をどの順で入れるか」を返すだけの関数。
   // 中身を見て確かめられるように出している。
-  detectBackend, torchPlan, pyEnv, stopAll,
+  detectBackend, torchPlan, pyEnv, stopAll, ensurePythonDevFiles,
 };

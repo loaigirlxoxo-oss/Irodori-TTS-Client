@@ -38,6 +38,13 @@ const PIP_URL = 'https://files.pythonhosted.org/packages/f3/6e/'
 // PyPI が公開している digest そのもの。
 const PIP_SHA256 = '71138adf1f4ca900cdb7d289c21b7494329f2332b6d85f0e1c42108c0384ed3e';
 
+// 埋め込み版には C の開発用ファイル（include と libs）が無い。学習の高速化で使う Triton は、
+// 起動のたびに小さな部品を C でコンパイルし、Python.h と python312.lib を要る（無いと
+// 「include file 'Python.h' not found」で学習が止まった。インストール版で実測）。
+// 同じ版の公式 NuGet パッケージから、その2つのフォルダだけを取り出して足す。
+const DEV_URL = `https://www.nuget.org/api/v2/package/python/${PY_VERSION}`;
+const DEV_SHA256 = '0eb85c2dfccccf1b17352de4c397f69194035b7d37149eacc16f1147d93de3b8';
+
 const OUT = path.join(__dirname, 'python-embed');
 // 何を入れたかの控え。次のビルドはこれを見て、同じ版・同じハッシュで
 // 揃っているときだけ作り直しを省く。
@@ -75,8 +82,10 @@ function alreadyDone() {
   try {
     const m = JSON.parse(fs.readFileSync(MANIFEST, 'utf8'));
     if (m.python !== PY_VERSION || m.pythonSha256 !== PY_SHA256
-      || m.pip !== PIP_VERSION || m.pipSha256 !== PIP_SHA256) return false;
+      || m.pip !== PIP_VERSION || m.pipSha256 !== PIP_SHA256 || m.devSha256 !== DEV_SHA256) return false;
     if (!fs.existsSync(path.join(OUT, 'python.exe'))) return false;
+    if (!fs.existsSync(path.join(OUT, 'include', 'Python.h'))) return false;
+    if (!fs.existsSync(path.join(OUT, 'libs', 'python312.lib'))) return false;
     // wheel は 1.8MB なので毎回ハッシュを取り直す。控えの文字列だけで
     // 済ませると、壊れた・差し替えられたものをそのまま梱包してしまう。
     // Python 側は展開後の数千ファイルなので、ここでは再計算していない
@@ -128,6 +137,18 @@ async function main() {
   if (!text.includes('Lib\\site-packages')) text = `${text.trimEnd()}\nLib\\site-packages\n`;
   fs.writeFileSync(p, text);
 
+  console.log(`[fetch-python] ${DEV_URL} から include と libs を取得`);
+  const nupkg = path.join(OUT, 'python-dev.nupkg');
+  await download(DEV_URL, nupkg);
+  verify(nupkg, DEV_SHA256, 'Python include/libs');
+  const devTmp = path.join(OUT, '_dev');
+  fs.mkdirSync(devTmp, { recursive: true });
+  execFileSync(winTar, ['-xf', nupkg, '-C', devTmp, 'tools/include', 'tools/libs'], { stdio: 'inherit' });
+  fs.renameSync(path.join(devTmp, 'tools', 'include'), path.join(OUT, 'include'));
+  fs.renameSync(path.join(devTmp, 'tools', 'libs'), path.join(OUT, 'libs'));
+  fs.rmSync(devTmp, { recursive: true, force: true });
+  fs.unlinkSync(nupkg);
+
   console.log(`[fetch-python] pip ${PIP_VERSION} の wheel を取得`);
   const whl = path.join(OUT, PIP_FILE);
   await download(PIP_URL, whl);
@@ -136,6 +157,7 @@ async function main() {
   fs.writeFileSync(MANIFEST, JSON.stringify({
     python: PY_VERSION, pythonSha256: PY_SHA256,
     pip: PIP_VERSION, pipSha256: PIP_SHA256,
+    devSha256: DEV_SHA256,
     at: new Date().toISOString(),
   }, null, 1));
   console.log(`[fetch-python] 用意できた: ${OUT}`);

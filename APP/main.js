@@ -136,6 +136,8 @@ function startPythonServer(port) {
   // 同梱ランタイムは sys.path が固定されているので、隣のモジュールを読める
   // ようにしてから起動する。古い版から更新したときもここで直る。
   runtime.ensurePathFix(getDataRoot());
+  // 学習の高速化（Triton）に要る Python の include / libs を、古いランタイムにも足す。
+  runtime.ensurePythonDevFiles({ dataRoot: getDataRoot(), isPackaged: app.isPackaged });
   const pythonExe = getPythonExe();
   console.log(`[Electron] Python executable: ${pythonExe}`);
 
