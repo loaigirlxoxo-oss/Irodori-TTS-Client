@@ -1885,7 +1885,16 @@ def _compile_blocks(raw_model, train_cfg, is_main_process: bool) -> None:
       int8 量子化した重みとは作り直しが止まらなかった（1ステップ14.8秒）。
     """
     import importlib
+    import importlib.util
 
+    # Triton は C コンパイラを、環境変数 CC → Visual Studio の開発者環境（VSINSTALLDIR など）→
+    # 同梱の TinyCC の順に探す。開発者環境の変数だけ持っていて INCLUDE が無いと cl.exe を選んで
+    # 失敗した（インストール版で実測）。CC が無ければ同梱の TinyCC を明示して、環境で変わらないようにする。
+    spec = importlib.util.find_spec("triton")
+    if not os.environ.get("CC") and spec is not None and spec.origin:
+        tcc = Path(spec.origin).parent / "runtime" / "tcc" / "tcc.exe"
+        if tcc.is_file():
+            os.environ["CC"] = str(tcc)
     importlib.import_module("torch._inductor.config").disable_cpp_codegen = True
     dynamo = importlib.import_module("torch._dynamo")
     dynamo.config.recompile_limit = int(train_cfg.compile_recompile_limit)
