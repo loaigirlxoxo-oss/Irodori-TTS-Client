@@ -1507,3 +1507,19 @@ textarea, .glass-textarea { height:auto; padding:8px 10px; font-size:14px; line-
 .settings-sec { padding:14px 18px 18px; }
 .settings-h { font-size:13px; font-weight:400; letter-spacing:.1em; color:var(--gold); margin:0 0 6px; }
 .settings-choices { display:flex; flex-direction:column; gap:6px; margin:10px 0 6px; }
+.settings-pc { display:inline-flex; gap:14px; padding:5px 11px; border:1px solid var(--gold-dim); margin:4px 0 10px; font-size:12.5px; }
+.settings-pc b, .settings-sum b { color:var(--gold); font-weight:400; font-variant-numeric:tabular-nums; }
+.tbl-wrap { overflow-x:auto; }
+.models-table { width:100%; border-collapse:collapse; font-size:12.5px; }
+.models-table th { text-align:left; font-weight:400; color:var(--faint); font-size:11px; padding:5px 7px; border-bottom:1px solid var(--line); white-space:nowrap; }
+.models-table td { padding:6px 7px; border-bottom:1px solid var(--line); vertical-align:middle; }
+.models-table td.num, .models-table th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+.models-table tr.group td { color:var(--faint); font-size:11px; padding-top:10px; border-bottom:none; }
+.models-table tr.dis td { color:var(--faint); }
+.models-table .over { color:var(--gold); }
+.models-table .ok { color:var(--ok); white-space:nowrap; }
+.models-table .no { color:var(--faint); white-space:nowrap; }
+.models-table .bar { display:inline-block; width:90px; height:2px; background:var(--line); vertical-align:middle; }
+.models-table .bar i { display:block; height:100%; background:var(--gold); }
+.settings-sum { margin-top:8px; }
+.settings-update { display:flex; flex-wrap:wrap; gap:8px 14px; align-items:center; margin:4px 0 6px; }

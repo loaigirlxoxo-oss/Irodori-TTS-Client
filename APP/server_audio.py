@@ -122,6 +122,9 @@ def _get_whisper_model():
             if _whisper_model is None:
                 from transformers import WhisperProcessor, WhisperForConditionalGeneration
                 device = "cuda" if torch.cuda.is_available() else "cpu"
+                if device == "cuda":
+                    from irodori_tts import vram_guard
+                    vram_guard.apply()  # あふれる前に止める
                 dtype = torch.float16 if device == "cuda" else torch.float32
                 # 取りに行かずキャッシュだけで解決する（server.py の
                 # resolve_checkpoint と同じ方針）。fetch_models.py は
@@ -210,6 +213,9 @@ def _get_qwen_model():
                     raise RuntimeError(f"{QWEN_ASR_REPO} がまだ取得されていません")
                 from transformers import AutoModelForMultimodalLM, AutoProcessor
                 device = "cuda" if torch.cuda.is_available() else "cpu"
+                if device == "cuda":
+                    from irodori_tts import vram_guard
+                    vram_guard.apply()  # あふれる前に止める
                 dtype = torch.bfloat16 if device == "cuda" else torch.float32
                 processor = AutoProcessor.from_pretrained(path, local_files_only=True)
                 model = AutoModelForMultimodalLM.from_pretrained(

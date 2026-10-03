@@ -18,6 +18,14 @@ IRODORI_WATERMARK_PAYLOAD = (73, 82, 68, 84, 83)  # "IRDTS"
 # The watermark payload is identical in all three; only what happens to the voice differs.
 WATERMARK_MODES = ("resample", "native44", "delta")
 _MODEL_SR = 44100
+# The payload repeats every message_len (21) STFT frames of 2048 samples at 44.1 kHz.
+# Long clips are watermarked in pieces so the watermark model's VRAM stays flat
+# (30 s at once peaked at about 2.5 GiB and ran a 6 GB card out of memory).
+# Each piece must start on a multiple of this period; pieces that start anywhere
+# else restart the pattern out of phase and the result no longer decodes (measured).
+_PAYLOAD_PERIOD = 21 * 2048
+_CHUNK_PERIODS = 10     # about 9.75 s per piece (VRAM peak about 1.0 GiB)
+_CONTEXT_PERIODS = 1    # extra audio on both sides so the piece edges match the whole-clip result
 
 
 @dataclass(frozen=True)
@@ -108,16 +116,26 @@ class SilentCipherWatermarker:
     def ready(self) -> bool:
         return self.model is not None
 
-    def _encode(self, vector: torch.Tensor, sample_rate: int, payload: list[int],
+    def _encode(self, vector: torch.Tensor, payload: list[int],
                 strength_db: float | None) -> torch.Tensor:
-        encoded, _ = self.model.encode_wav(
-            vector.to(self.model.device),
-            int(sample_rate),
-            payload,
-            message_sdr=strength_db,
-            calc_sdr=False,
-        )
-        return torch.as_tensor(encoded, dtype=torch.float32, device="cpu").reshape(-1)
+        """Watermark a 44.1 kHz clip in period-aligned pieces."""
+        step = _CHUNK_PERIODS * _PAYLOAD_PERIOD
+        ctx = _CONTEXT_PERIODS * _PAYLOAD_PERIOD
+        n = vector.numel()
+        out = torch.empty(n, dtype=torch.float32)
+        for start in range(0, n, step):
+            end = min(n, start + step)
+            lo, hi = max(0, start - ctx), min(n, end + ctx)
+            encoded, _ = self.model.encode_wav(
+                vector[lo:hi].to(self.model.device),
+                _MODEL_SR,
+                payload,
+                message_sdr=strength_db,
+                calc_sdr=False,
+            )
+            piece = torch.as_tensor(encoded, dtype=torch.float32, device="cpu").reshape(-1)
+            out[start:end] = piece[start - lo:start - lo + (end - start)]
+        return out
 
     def encode_one(
         self,
@@ -136,20 +154,21 @@ class SilentCipherWatermarker:
             return audio, int(sample_rate)
 
         sr = int(sample_rate)
-        payload = list(payload)
-        if spec.mode == "resample":
-            out, out_sr = self._encode(vector, sr, payload, spec.strength_db)[: vector.numel()], sr
-        elif spec.mode == "native44":
-            copy44 = _resample(vector.cpu(), sr, _MODEL_SR)
-            out, out_sr = self._encode(copy44, _MODEL_SR, payload, spec.strength_db), _MODEL_SR
+        voice = vector.cpu()
+        copy44 = _resample(voice, sr, _MODEL_SR)
+        marked44 = self._encode(copy44, list(payload), spec.strength_db)
+        if spec.mode == "native44":
+            out, out_sr = marked44, _MODEL_SR
+        elif spec.mode == "resample":
+            out = _resample(marked44, _MODEL_SR, sr)
+            out = torch.nn.functional.pad(out, (0, max(0, voice.numel() - out.numel())))[: voice.numel()]
+            out_sr = sr
         else:  # delta
-            copy44 = _resample(vector.cpu(), sr, _MODEL_SR)
-            diff44 = self._encode(copy44, _MODEL_SR, payload, spec.strength_db)[: copy44.numel()] - copy44
-            diff = _resample(diff44, _MODEL_SR, sr)
-            diff = torch.nn.functional.pad(diff, (0, max(0, vector.numel() - diff.numel())))[: vector.numel()]
+            diff = _resample(marked44 - copy44, _MODEL_SR, sr)
+            diff = torch.nn.functional.pad(diff, (0, max(0, voice.numel() - diff.numel())))[: voice.numel()]
             if spec.band_hz is not None:
                 diff = _band_limit(diff, sample_rate=sr, band_hz=spec.band_hz)
-            out, out_sr = vector.cpu() + diff, sr
+            out, out_sr = voice + diff, sr
         return _match_original_rank(out, reference=audio), out_sr
 
     def encode_batch(self, audios: list[torch.Tensor], *, sample_rate: int,

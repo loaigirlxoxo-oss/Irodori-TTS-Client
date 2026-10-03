@@ -58,7 +58,8 @@ const isVoiceDesignModel = m => VOICE_DESIGN_MODELS.includes(String(m));
 // 説明文（キャプション）で声を指定できるモデル。VoiceDesign 専用ではない。
 // v4 系は設定が use_caption_condition: true で、重みにも caption 用の層が入る。
 // server.py の _CAPTION_MODELS と同じ顔ぶれにすること。
-const CAPTION_MODELS = ['v4_1', 'v4_1_anime', 'v4', 'v4_large'];
+const LARGE_QUANT_MODELS = ['v4_large_int8', 'v4_large_int4', 'v4_large_fp8'];
+const CAPTION_MODELS = ['v4_1', 'v4_1_anime', 'v4', 'v4_large', ...LARGE_QUANT_MODELS];
 const acceptsCaption = m => isVoiceDesignModel(m) || CAPTION_MODELS.includes(String(m));
 
 // VoiceDesign は説明文が要る。v4 系は書かなくても鳴る。
@@ -78,7 +79,7 @@ function syncCaptionField(modelType) {
 // v4 系（v4-Small と v4.1-Small）。v4.1 は duration predictor だけを
 // 差し替えたもので、条件づけの作りは v4 と同じ。
 // v4-Large も絵文字の注釈（📖 など）を受け付ける v4 世代。
-const V4_MODELS = ['v4', 'v4_1', 'v4_1_anime', 'v4_large'];
+const V4_MODELS = ['v4', 'v4_1', 'v4_1_anime', 'v4_large', ...LARGE_QUANT_MODELS];
 const isV4Model = m => V4_MODELS.includes(String(m));
 
 const NARRATION_EMOJI = '📖';
@@ -690,6 +691,7 @@ async function init() {
   setupSynthSaveFolder();
   setupMetaImport();
   setupSettings();
+  refreshModelAvailability();
   // 学習は Train タブを離れても続く。生成側でも状態を持っておく。
   pollTrainingBusy();
   setInterval(pollTrainingBusy, 3000);
@@ -1311,9 +1313,171 @@ function setupSettings() {
     modal.classList.remove('hidden');
     document.getElementById('wm-status').textContent = '';
     loadWatermarkChoice();
+    loadModelCatalog();
+    showAppVersion();
   });
+  document.getElementById('update-check')?.addEventListener('click', checkForUpdate);
+  document.getElementById('update-run')?.addEventListener('click', runUpdate);
   close.addEventListener('click', () => modal.classList.add('hidden'));
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
+}
+
+// ── 音声モデル（取得・削除）────────────────────────────────────────
+// 一覧の中身は model_catalog.py が唯一の出所。容量と VRAM もそこから来る。
+let modelPollTimer = null;
+
+async function loadModelCatalog() {
+  const status = document.getElementById('models-status');
+  try {
+    const res = await fetch(`${API_URL}/models/catalog`);
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || `status ${res.status}`);
+    renderModelCatalog(json);
+    applyModelAvailability(json.models);
+    const running = json.job && ['running', 'cancelling'].includes(json.job.state);
+    if (running && !modelPollTimer) modelPollTimer = setInterval(loadModelCatalog, 1000);
+    if (!running && modelPollTimer) { clearInterval(modelPollTimer); modelPollTimer = null; }
+    if (json.job && json.job.state === 'failed') status.textContent = `取得できませんでした: ${json.job.error || ''}`;
+  } catch (err) {
+    status.textContent = `一覧を読み込めませんでした: ${err.message || err}`;
+  }
+}
+
+function renderModelCatalog(json) {
+  const gpu = json.gpu || {};
+  document.getElementById('models-gpu-name').textContent = gpu.name || 'GPU なし';
+  document.getElementById('models-gpu-vram').textContent = gpu.vram_gb ? `${gpu.vram_gb}GB` : '—';
+  const job = json.job;
+  const busy = job && ['running', 'cancelling'].includes(job.state);
+  let h = '<tr><th>モデル</th><th class="num">容量</th><th class="num">生成時の VRAM</th><th>状態</th><th></th></tr>';
+  let group = '';
+  let have = json.common_gb || 0;
+  for (const m of json.models) {
+    if (m.group !== group) { group = m.group; h += `<tr class="group"><td colspan="5">${group}</td></tr>`; }
+    if (m.downloaded) have += m.size_gb;
+    let vram;
+    if (!m.runnable) vram = '<span class="no">この GPU では動きません</span>';
+    else if (m.vram_gb == null) vram = '—';
+    else {
+      const over = gpu.vram_gb && m.vram_gb > gpu.vram_gb;
+      vram = `<span class="${over ? 'over' : ''}">${m.vram_gb.toFixed(1)}GB${over ? ' ⚠ 足りません' : ''}</span>`;
+    }
+    let st;
+    let act = '';
+    if (job && job.id === m.id && busy) {
+      const pct = Math.min(100, Math.round((job.done_gb / job.total_gb) * 100));
+      st = `<span class="bar"><i style="width:${pct}%"></i></span> <span class="note">${pct}%（${job.done_gb.toFixed(1)} / ${job.total_gb.toFixed(1)}GB）</span>`;
+      act = job.state === 'running' ? '<button class="btn btn-ghost btn-sm" data-act="cancel">中止</button>' : '';
+    } else if (m.downloaded) {
+      st = '<span class="ok">取得済み</span>';
+      act = `<button class="btn btn-ghost btn-sm" data-act="delete" data-id="${m.id}">削除</button>`;
+    } else {
+      st = '<span class="no">未取得</span>';
+      act = m.runnable && !busy ? `<button class="btn btn-ghost btn-sm" data-act="download" data-id="${m.id}">取得</button>` : '';
+    }
+    h += `<tr class="${m.runnable ? '' : 'dis'}"><td>${m.label}<span class="note">（${m.note}）</span></td>`
+       + `<td class="num">${m.size_gb.toFixed(1)}GB</td><td class="num">${vram}</td><td>${st}</td><td>${act}</td></tr>`;
+  }
+  const table = document.getElementById('models-table');
+  table.innerHTML = h;
+  table.querySelectorAll('button[data-act]').forEach(b => b.addEventListener('click', () => modelAction(b.dataset.act, b.dataset.id)));
+  document.getElementById('models-have-total').textContent = `約${Math.round(have)}GB（共通の部品 約${Math.round(json.common_gb || 0)}GB を含む）`;
+}
+
+async function modelAction(act, id) {
+  const status = document.getElementById('models-status');
+  status.textContent = '';
+  try {
+    let res;
+    if (act === 'download') res = await fetch(`${API_URL}/models/${id}/download`, { method: 'POST' });
+    else if (act === 'cancel') res = await fetch(`${API_URL}/models/download/cancel`, { method: 'POST' });
+    else if (act === 'delete') {
+      if (!confirm('このモデルを削除します。使うときはもう一度取得が必要です。')) return;
+      res = await fetch(`${API_URL}/models/${id}`, { method: 'DELETE' });
+    }
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || `status ${res.status}`);
+  } catch (err) {
+    status.textContent = err.message || String(err);
+  }
+  loadModelCatalog();
+}
+
+// 取得していないモデルは、選べる一覧で「（未取得）」にして選べなくする。
+// 生成・学習・かんたん学習の VoiceDesign の3か所。
+function applyModelAvailability(models) {
+  const have = new Map(models.map(m => [m.id, m.downloaded]));
+  for (const sel of ['model-type', 'tr-base', 'easy-vd-model']) {
+    const el = document.getElementById(sel);
+    if (!el) continue;
+    for (const opt of el.options) {
+      if (!have.has(opt.value)) continue;
+      if (!opt.dataset.label) opt.dataset.label = opt.textContent;
+      const missing = !have.get(opt.value);
+      opt.disabled = missing;
+      opt.textContent = missing ? `${opt.dataset.label}（未取得）` : opt.dataset.label;
+    }
+  }
+}
+
+async function refreshModelAvailability() {
+  try {
+    const res = await fetch(`${API_URL}/models/catalog`);
+    if (res.ok) applyModelAvailability((await res.json()).models);
+  } catch (err) {
+    console.error('モデルの取得状況を読めませんでした', err);
+  }
+}
+
+// ── アップデート ───────────────────────────────────────────────────
+async function showAppVersion() {
+  try {
+    document.getElementById('update-current').textContent = await window.api.appVersion();
+  } catch (err) {
+    console.error(err);
+  }
+}
+
+async function checkForUpdate() {
+  const latest = document.getElementById('update-latest');
+  const run = document.getElementById('update-run');
+  const status = document.getElementById('update-status');
+  status.textContent = '確認しています…';
+  run.classList.add('hidden');
+  try {
+    const r = await window.api.checkUpdate();
+    status.textContent = '';
+    if (r.error) throw new Error(r.error);
+    if (r.newer) {
+      latest.textContent = `新しい版 ${r.latest} があります（${r.published || ''}）`;
+      run.classList.toggle('hidden', !r.canInstall);
+      if (!r.canInstall) status.textContent = r.reason || '';
+    } else {
+      latest.textContent = `いまの版が最新です（${r.latest}）`;
+    }
+  } catch (err) {
+    status.textContent = `確認できませんでした: ${err.message || err}`;
+  }
+}
+
+async function runUpdate() {
+  const status = document.getElementById('update-status');
+  const run = document.getElementById('update-run');
+  if (!confirm('新しい版をダウンロードして、インストーラを起動します。アプリは閉じます。')) return;
+  run.disabled = true;
+  const off = window.api.onUpdateProgress((p) => {
+    status.textContent = p.total ? `ダウンロード中… ${Math.round((p.done / p.total) * 100)}%` : 'ダウンロード中…';
+  });
+  try {
+    const r = await window.api.runUpdate();
+    if (r.error) throw new Error(r.error);
+    status.textContent = 'インストーラを起動しました。';
+  } catch (err) {
+    status.textContent = `更新できませんでした: ${err.message || err}`;
+    run.disabled = false;
+  } finally {
+    off();
+  }
 }
 
 // 透かしの入れ方。外す選択肢はサーバ側にも無い（watermark_settings.py）。
@@ -1896,7 +2060,8 @@ function updateLoraVoiceHint() {
 // 重みが違うだけで構造が同じベースは、LoRA を互いに当てられる。
 // v4.1-Anime は v4.1-Small の追加学習で、safetensors のキーと形状が
 // 完全に一致する（実測）。判定規則はサーバー側 is_lora_compatible と対。
-const BASE_ALIASES = [['v4_1', 'v4_1_anime']];
+// 量子化版は v4-Large の重みを縮めただけ。v4-Large の LoRA がそのまま当たる（server.py と同じ組）。
+const BASE_ALIASES = [['v4_1', 'v4_1_anime'], ['v4_large', ...LARGE_QUANT_MODELS]];
 const isLoraCompatible = (loraBase, model) =>
   loraBase === model ||
   BASE_ALIASES.some(g => g.includes(loraBase) && g.includes(model));

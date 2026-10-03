@@ -24,11 +24,13 @@ from irodori_tts.inference_runtime import (
     RuntimeKey,
     SamplingRequest,
     get_cached_runtime,
+    clear_cached_runtime,
     save_wav,
     default_runtime_device,
     list_available_runtime_devices,
 )
 from huggingface_hub import hf_hub_download
+from irodori_tts import vram_guard
 
 import server_lora  # LoRA registry endpoints (list/import/delete)
 import server_audio  # Audio split + transcribe endpoints
@@ -51,6 +53,7 @@ import server_dataset  # Dataset CRUD endpoints
 import server_easy  # かんたん学習（生成→データセット→学習→採用）
 import server_train  # LoRA training job management
 import watermark_settings  # 透かしの入れ方（外せない。声の扱いだけ選ぶ）
+import server_models  # 設定画面の音声モデル（一覧・取得・削除）
 from data_paths import (data_root, outputs_dir, voices_metadata_path, migrate_legacy_voices,
                         manual_checkpoint, OPTIONAL_MODELS,
                         missing_optional_model_message)
@@ -69,6 +72,7 @@ app.include_router(server_audio.router)
 app.include_router(server_dataset.router)
 app.include_router(server_easy.router)
 app.include_router(server_train.router)
+app.include_router(server_models.router)
 
 app.add_middleware(
     CORSMiddleware,
@@ -102,7 +106,50 @@ MODELS = {
     # 取りに行かない（inference_runtime._resolve_tokenizer_source）。
     # bf16 で VRAM の山 7.6 GiB、40 ステップで約 15 秒（RTX 5080 で実測）。
     "v4_large": "Aratako/Irodori-TTS-v4-Large",
+    # v4-Large の量子化版（torchao）。リポジトリは1つで、種類ごとにフォルダが分かれる
+    # ので「リポジトリ/フォルダ」で持つ。トークナイザはリポジトリ直下の tokenizer/。
+    # 生成は bf16 でしか動かない。int4 は RTX 30 系以降、float8 は RTX 40 系以降。
+    # dynamic の2種は weight-only の5〜8倍遅かった（実測）ので入れない。
+    "v4_large_int8": "Aratako/Irodori-TTS-v4-Large-Quantized/int8-weight-only",
+    "v4_large_int4": "Aratako/Irodori-TTS-v4-Large-Quantized/int4-weight-only",
+    "v4_large_fp8": "Aratako/Irodori-TTS-v4-Large-Quantized/float8-weight-only",
 }
+
+# 量子化版が動く GPU の世代（compute capability の下限）。モデルカードの記載。
+_QUANT_MIN_CAPABILITY = {
+    "v4_large_int8": (0, 0),
+    "v4_large_int4": (8, 0),
+    "v4_large_fp8": (8, 9),
+}
+
+
+def is_quantized_model(model_type: str) -> bool:
+    return str(model_type) in _QUANT_MIN_CAPABILITY
+
+
+def quantized_model_problem(model_type: str) -> str | None:
+    """量子化版がこの PC で動かない理由。動くなら None。"""
+    need = _QUANT_MIN_CAPABILITY.get(str(model_type))
+    if need is None:
+        return None
+    info = gpu_info()
+    if info["device"] != "cuda" or info["rocm"] or not info["capability"]:
+        return f"{model_label(model_type)} は NVIDIA の GPU でしか動きません。"
+    cap = tuple(int(x) for x in info["capability"].split("."))
+    if not info["bf16_fast"]:
+        return f"{model_label(model_type)} は RTX 30 系以降の GPU が必要です。"
+    if cap < need:
+        series = "RTX 40 系以降" if need >= (8, 9) else "RTX 30 系以降"
+        return f"{model_label(model_type)} は {series} の GPU が必要です。"
+    return None
+
+
+def _split_repo(source: str) -> tuple[str, str]:
+    """「リポジトリ」か「リポジトリ/フォルダ」を、(repo_id, model.safetensors の場所) にする。"""
+    parts = source.split("/")
+    if len(parts) == 3:
+        return "/".join(parts[:2]), f"{parts[2]}/model.safetensors"
+    return source, "model.safetensors"
 
 def _resolve_checkpoint(repo_id: str) -> str:
     """Path to a model.safetensors that setup has already downloaded.
@@ -119,9 +166,10 @@ def _resolve_checkpoint(repo_id: str) -> str:
     manual = manual_checkpoint(repo_id)
     if manual is not None:
         return manual
+    repo, filename = _split_repo(repo_id)
     try:
         return hf_hub_download(
-            repo_id=repo_id, filename="model.safetensors", local_files_only=True
+            repo_id=repo, filename=filename, local_files_only=True
         )
     except Exception as exc:  # noqa: BLE001
         if repo_id in OPTIONAL_MODELS:
@@ -144,6 +192,10 @@ _CFG_DEFAULTS = {
     "v4_1_anime": {"text": 3.0, "speaker": 5.0},
     # モデルカードの既定は text CFG 3.0。話者の値は書かれていないので v4 系に揃える。
     "v4_large": {"text": 3.0, "speaker": 5.0},
+    # 量子化版は v4-Large の重みを縮めただけなので同じ値。
+    "v4_large_int8": {"text": 3.0, "speaker": 5.0},
+    "v4_large_int4": {"text": 3.0, "speaker": 5.0},
+    "v4_large_fp8": {"text": 3.0, "speaker": 5.0},
     "_": {"text": 2.0, "speaker": 3.0},
 }
 
@@ -158,8 +210,11 @@ _CFG_DEFAULTS = {
 #   置換する。v4.1 の改良点はそこだけなので、当てると丸ごと上書きされて
 #   v4 に当てたのと同じ出力になる（同一 seed で sha256 一致を実測）。
 #   「使えない」のではなく「v4.1 を選ぶ意味が消える」ので通さない。
+#   v4_large と量子化版: 重みを縮めただけで構造は同じ。v4-Large で学習した
+#   コハルの LoRA を int8 / int4 / float8 に当てて鳴ることを実測で確認した。
 _BASE_ALIASES = (
     frozenset({"v4_1", "v4_1_anime"}),
+    frozenset({"v4_large", "v4_large_int8", "v4_large_int4", "v4_large_fp8"}),
 )
 
 
@@ -177,6 +232,9 @@ MODEL_LABELS = {
     "v4_1_anime": "v4.1-Anime",
     "v4": "v4-Small",
     "v4_large": "v4-Large",
+    "v4_large_int8": "v4-Large 軽量 int8",
+    "v4_large_int4": "v4-Large 軽量 int4",
+    "v4_large_fp8": "v4-Large 軽量 float8",
     "v3": "v3",
     "v2": "v2",
     "v3_voice_design": "v3 Voice Design",
@@ -210,7 +268,8 @@ def is_voice_design_model(model_type: str) -> bool:
 #   「落ち着いた低めの女性の声」vs「とても高く幼い女の子の声」 -> 0.196
 # VoiceDesign と違い、v4 系はキャプション無しでも鳴るので必須ではない。
 # v4-Large も use_caption_condition: true（チェックポイントの設定で確認）。
-_CAPTION_MODELS = frozenset({"v4_1", "v4_1_anime", "v4", "v4_large"})
+_CAPTION_MODELS = frozenset({"v4_1", "v4_1_anime", "v4", "v4_large",
+                             "v4_large_int8", "v4_large_int4", "v4_large_fp8"})
 
 
 def accepts_caption(model_type: str) -> bool:
@@ -238,43 +297,11 @@ def drop_cuda_cache() -> None:
 OPENAI_NUM_STEPS = 40
 OPENAI_DURATION_SCALE = 1.0
 
-# bf16 のネイティブ命令があるのは Ampere（Compute Capability 8.0）以降。
-# それ未満の GPU でも torch は bf16 を受け付けるが、変換を挟んで動くので
-# 実行が遅くなるだけになる。ランタイム側の可否判定は device の種類しか
-# 見ないので、世代の判断はここで持つ。
-#
-# 注意: 対応世代でも bf16 が「速い」わけではない。このパイプラインでは
-# 実測で fp32 1.45s 対 bf16 1.75s（約 1.2 倍おそい）。行列積単体では
-# bf16 が速い（4096^2 で fp32 6.77ms 対 bf16 2.57ms）ので、GPU の性能では
-# なく前後の処理で相殺されている。bf16 の利点は VRAM で、常駐が
-# 3460 -> 1785 MiB に減る。速度と VRAM の交換であって両立ではない。
-# auto が bf16 を選ぶのは、8GB 級で v4 が載るかどうかを分ける差だから。
-_BF16_MIN_CAPABILITY = (8, 0)
+# gpu_info は gpu_probe.py に移した（初回セットアップのモデル一覧からも使うため）。
+from gpu_probe import gpu_info  # noqa: E402
 
 
-def gpu_info() -> dict:
-    """UI が精度を選ぶための材料。CUDA 以外では bf16 を出さない。"""
-    info = {"device": default_runtime_device(), "name": None,
-            "capability": None, "bf16_fast": False, "rocm": False}
-    try:
-        import torch
-        # ROCm 版 torch は torch.cuda として振る舞うので、cuda かどうかでは
-        # 区別できない。torch.version.hip が入っているかで見る。
-        info["rocm"] = bool(getattr(torch.version, "hip", None))
-        if torch.cuda.is_available():
-            info["name"] = torch.cuda.get_device_name(0)
-            if not info["rocm"]:
-                cap = torch.cuda.get_device_capability(0)
-                info["capability"] = f"{cap[0]}.{cap[1]}"
-                info["bf16_fast"] = cap >= _BF16_MIN_CAPABILITY
-            else:
-                # Radeon の bf16 は AMD の資料に明記が無く、実機で確かめて
-                # いない。自動では選ばず、必要なら手で選んでもらう。
-                info["capability"] = None
-                info["bf16_fast"] = False
-    except Exception:  # noqa: BLE001 - 情報が取れなくても生成は続けられる
-        pass
-    return info
+server_models.configure(unload_runtime=clear_cached_runtime)
 
 
 def resolve_device(requested: str) -> str:
@@ -313,18 +340,51 @@ def available_devices() -> list[str]:
     return ["auto"] + list_available_runtime_devices()
 
 
+_vram_limit: dict | None = None   # 直近にかけた VRAM の上限。足りないときの案内に使う
+
+
+def _error_response(exc: Exception) -> JSONResponse:
+    """生成の失敗を返す。VRAM 不足は、上限で止めたことが分かる文にして 507 で返す。"""
+    import torch
+
+    if isinstance(exc, torch.OutOfMemoryError):
+        # 読み込みの途中で止まったモデルの断片が GPU に残る。例外が掴んでいる参照を
+        # 切ってから、読み込み済みのモデルごと手放す。次の生成で読み直す。
+        import gc
+
+        exc.__traceback__ = None
+        clear_cached_runtime()
+        gc.collect()
+        torch.cuda.empty_cache()
+        return JSONResponse(status_code=507, content={"error": vram_guard.out_of_memory_message(_vram_limit)})
+    return JSONResponse(status_code=500, content={"error": str(exc)})
+
+
 def resolve_and_load_model(model_type: str = "v2", precision: str = "auto",
                            device: str = "auto"):
     repo_id = MODELS.get(model_type)
     if repo_id is None:
         raise ValueError(f"Unknown model_type: {model_type!r}")
+    if is_quantized_model(model_type):
+        problem = quantized_model_problem(model_type)
+        if problem is None and resolve_device(device) != "cuda":
+            problem = f"{model_label(model_type)} は GPU でしか動きません。計算装置を自動か GPU にしてください。"
+        if problem:
+            raise RuntimeError(problem)
     checkpoint_path = _resolve_checkpoint(repo_id)
     dev = resolve_device(device)
+    # 読み込みと生成の前に、いまの空きに合わせて VRAM の上限をかけ直す。
+    # あふれて本体メモリへ逃げる前に、エラーで止めるため（vram_guard.py）。
+    global _vram_limit
+    _vram_limit = vram_guard.apply() if dev == "cuda" else None
     # bf16 は CUDA/XPU でしか使えない。CPU に落としたときに bf16 のままだと
     # ランタイム側で例外になるので、ここで fp32 へ倒す。
     prec = resolve_precision(precision)
     if dev not in ("cuda", "xpu") and prec == "bf16":
         prec = "fp32"
+    # 量子化版は bf16 で計算する作り（モデルカードの指定）。fp32 を選んでいても上書きする。
+    if is_quantized_model(model_type):
+        prec = "bf16"
 
     runtime_key = RuntimeKey(
         checkpoint=checkpoint_path,
@@ -337,6 +397,12 @@ def resolve_and_load_model(model_type: str = "v2", precision: str = "auto",
         compile_dynamic=False,
     )
 
+    # 別のモデルへ切り替えるときは、先に前のモデルを手放す。get_cached_runtime は
+    # 新しいほうを読み込んでから古いほうを捨てるので、その間は2つぶんの VRAM が要る
+    # （VRAM 6GB では v4.1 から軽量版 Large へ切り替えられない）。
+    import irodori_tts.inference_runtime as _rt
+    if _rt._RUNTIME_CACHE_KEY is not None and _rt._RUNTIME_CACHE_KEY != runtime_key:
+        clear_cached_runtime()
     runtime, reloaded = get_cached_runtime(runtime_key)
     return runtime, reloaded
 
@@ -812,7 +878,7 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return _error_response(e)
     finally:
         # 失敗したときも消す。一時ファイルは毎回名前が変わるので、残すと溜まる。
         if is_temp_file and temp_ref_path and temp_ref_path.exists():
@@ -1038,7 +1104,7 @@ async def openai_audio_speech(request: Request):
     except Exception as e:
         import traceback
         traceback.print_exc()
-        return JSONResponse(status_code=500, content={"error": str(e)})
+        return _error_response(e)
 
 if __name__ == "__main__":
     port = listen_port()

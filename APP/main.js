@@ -196,6 +196,22 @@ function startPythonServer(port) {
 //
 // 読み込みの完了を待ってから返す。待たずに進捗を送ると、画面側が
 // 受け口を用意する前に最初の1通が飛び、工程1が出ないまま進む。
+// 初回セットアップで、取得する音声モデルを選んでもらう。表が入るように窓を広げ、
+// 選び終わったら元の大きさに戻して取得の進み具合を出す。
+function chooseModelsInSetup(win, catalog) {
+  return new Promise((resolve) => {
+    ipcMain.once('setup-models-chosen', (_e, ids) => {
+      if (!win.isDestroyed()) { win.setResizable(true); win.setSize(620, 430); win.setResizable(false); win.center(); }
+      resolve(Array.isArray(ids) ? ids.map(String) : []);
+    });
+    win.setResizable(true);
+    win.setSize(820, 720);
+    win.setResizable(false);
+    win.center();
+    win.webContents.send('setup-choose-models', catalog);
+  });
+}
+
 async function createSetupWindow() {
   const win = new BrowserWindow({
     width: 620, height: 430, resizable: false,
@@ -279,7 +295,8 @@ app.whenReady().then(async () => {
         dataRoot: getDataRoot(),
         backendDir: getBackendDir(),
         isPackaged: app.isPackaged,
-        onProgress: (p) => { if (!win.isDestroyed()) win.webContents.send('setup-progress', p); }
+        onProgress: (p) => { if (!win.isDestroyed()) win.webContents.send('setup-progress', p); },
+        chooseModels: (catalog) => chooseModelsInSetup(win, catalog),
       });
     } catch (err) {
       const message = String(err && err.message ? err.message : err);
@@ -309,6 +326,16 @@ app.whenReady().then(async () => {
 
 // レンダラーは自分でポートを決められないので、main が確定させた値を渡す。
 ipcMain.handle('get-api-port', () => apiPort);
+
+// 設定画面のアップデート（updater.js）
+const updater = require('./updater');
+ipcMain.handle('app-version', () => app.getVersion());
+ipcMain.handle('check-update', () => updater.checkUpdate({ currentVersion: app.getVersion(), isPackaged: app.isPackaged }));
+ipcMain.handle('run-update', (e) => updater.runUpdate({
+  isPackaged: app.isPackaged,
+  onProgress: (p) => { if (!e.sender.isDestroyed()) e.sender.send('update-progress', p); },
+  quit: () => app.quit(),
+}));
 
 // Full cleanup on exit
 app.on('window-all-closed', function () {

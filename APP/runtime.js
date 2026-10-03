@@ -2,7 +2,7 @@
 //
 //   1. ランタイムを作る   同梱の埋め込み Python を data\runtime\python へ写して pip を入れる
 //   2. ライブラリを入れる GPU を見て cu128 / cu126 / rocm / cpu を選び、requirements を入れる
-//   3. モデルを取得       fetch_models.py（約30GB）
+//   3. モデルを取得       取得するモデルを選んでもらい（model_catalog.py）、fetch_models.py で取る
 //
 // 進捗は onProgress で返す。黒い画面に流れるだけだと、止まっているのか
 // 進んでいるのか分からないため。
@@ -204,7 +204,7 @@ function torchPlan(backend) {
       // torchcodec は torch の ABI に合わせた作りで ROCm 版が無いが、
       // 読み書きは soundfile へ落ちる（irodori_tts/codec.py）。
       // Triton は CUDA 専用（学習の高速化に使う）。Radeon では使えないので入れない。
-      drop: ['torch', 'torchaudio', 'torchcodec', 'triton-windows'],
+      drop: ['torch', 'torchaudio', 'torchcodec', 'triton-windows', 'torchao'],
     };
   }
   const version = backend === 'cpu' ? '2.10.0' : `2.10.0+${backend}`;
@@ -217,7 +217,8 @@ function torchPlan(backend) {
     // cu128 / cu126 / cpu は requirements の torch>=2.10.0 を満たすので外さない。
     // 版は constraints で固定し、別の依存が引き上げるのを止める。
     // Triton は CUDA 専用（学習の高速化に使う）。CPU では使えないので入れない。
-    drop: backend === 'cpu' ? ['triton-windows'] : [],
+    // torchao は量子化版 v4-Large 用。量子化版は NVIDIA の GPU でしか動かない。
+    drop: backend === 'cpu' ? ['triton-windows', 'torchao'] : [],
   };
 }
 
@@ -378,7 +379,7 @@ function copyDir(src, dest) {
  * @param {boolean} o.isPackaged
  * @param {(p:{step:string,index:number,total:number,detail?:string,final?:boolean})=>void} o.onProgress
  */
-async function ensureRuntime({ dataRoot, backendDir, isPackaged, onProgress }) {
+async function ensureRuntime({ dataRoot, backendDir, isPackaged, onProgress, chooseModels }) {
   const total = 3;
   const s = state({ dataRoot, backendDir, isPackaged });
   const py = runtimePython(dataRoot);
@@ -459,16 +460,25 @@ async function ensureRuntime({ dataRoot, backendDir, isPackaged, onProgress }) {
   }
 
   if (!s.hasModels) {
-    onProgress({ step: '音声モデルを取得しています（約30GB）', index: 3, total });
-    await run(py, [path.join(backendDir, 'fetch_models.py')],
-      { cwd: backendDir,
-        env: pyEnv({ HF_HOME: modelsDir(dataRoot),
-                     IRODORI_MODELS_DIR: modelsDir(dataRoot),
-                     PYTHONUNBUFFERED: '1' }) },
-      log('音声モデルを取得しています（約30GB）', 3));
+    const modelEnv = pyEnv({ HF_HOME: modelsDir(dataRoot), IRODORI_MODELS_DIR: modelsDir(dataRoot),
+                             PYTHONUNBUFFERED: '1', PYTHONIOENCODING: 'utf-8', HF_HUB_OFFLINE: '1' });
+    // 取得するモデルを選んでもらう。一覧（容量・VRAM・この GPU で動くか・取得済みか）は
+    // model_catalog.py が出す。設定画面の表と同じ中身。
+    onProgress({ step: '取得する音声モデルを選んでください', index: 3, total, detail: '' });
+    let catalogLine = '';
+    await run(py, [path.join(backendDir, 'model_catalog.py')], { cwd: backendDir, env: modelEnv },
+      (line) => { if (line.startsWith('{')) catalogLine = line; });
+    const ids = await chooseModels(JSON.parse(catalogLine));
+
+    const step = '音声モデルを取得しています';
+    onProgress({ step, index: 3, total, detail: '' });
+    const fetchEnv = { ...modelEnv };
+    delete fetchEnv.HF_HUB_OFFLINE;
+    await run(py, [path.join(backendDir, 'fetch_models.py'), '--models', ids.join(',')],
+      { cwd: backendDir, env: fetchEnv }, log(step, 3));
     // fetch_models.py が 0 で終わったときだけ印を置く。途中で落ちれば
-    // 印が無いままなので、次の起動で続きから取りに行く。
-    writeMarker(modelsMarker(dataRoot), { schema: SETUP_SCHEMA, fingerprint: s.wantModels });
+    // 印が無いままなので、次の起動で選び直して続きから取りに行く。
+    writeMarker(modelsMarker(dataRoot), { schema: SETUP_SCHEMA, fingerprint: s.wantModels, models: ids });
   }
 
   // final を立てて、工程名の上書きではなく「全部済み」の表示に使わせる。

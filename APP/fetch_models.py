@@ -14,36 +14,13 @@ from pathlib import Path
 
 # (repo_id, filename or None for whole-repo, label)
 #
-# 全て必須。「使わない人には要らない」という切り分けはしない。
-#   - VoiceDesign は Synthesize / Train / LoRAマージ の3画面で選択肢に出る。
-#     選んだ時点で必要になり、無ければその場でエラーになる。
+# どのモデルを選んでも要る部品。選ばせずに必ず取る。音声モデル本体は
+# model_catalog.py にあり、取得するものを利用者が選ぶ（初回セットアップと設定画面）。
 #   - anime-whisper は Dataset タブの書き起こしが from_pretrained で直接読む。
 #     無いとデータセットを作れず、LoRA 学習の入口ごと塞がる。
 # UI に出ている機能が使えない状態で「セットアップ完了」と言わないため、
 # 1つでも欠けたら失敗として扱う。
-TARGETS = [
-    ("Aratako/Irodori-TTS-500M-v2", "model.safetensors", "音声モデル v2"),
-    ("Aratako/Irodori-TTS-500M-v3", "model.safetensors", "音声モデル v3"),
-    ("Aratako/Irodori-TTS-v4-Small", "model.safetensors", "音声モデル v4"),
-    # v4.1 は v4 の duration predictor だけを差し替えたもので、上流の推奨。
-    # v4 も残すのは、既存の LoRA を作った条件で鳴らし直せるようにするため。
-    ("Aratako/Irodori-TTS-v4.1-Small", "model.safetensors", "音声モデル v4.1"),
-    # v4-Large（3.29B、13.2GB）。テキストエンコーダ T5Gemma 2 の重みは本体に同梱。
-    # トークナイザは同じリポジトリの tokenizer/ にあり、本体と同じスナップショットに
-    # 置かれていれば、gated の google/t5gemma-2-1b-1b に取りに行かない。
-    ("Aratako/Irodori-TTS-v4-Large", "model.safetensors", "音声モデル v4-Large"),
-    ("Aratako/Irodori-TTS-v4-Large", "tokenizer/tokenizer.json", "音声モデル v4-Large(トークナイザ)"),
-    ("Aratako/Irodori-TTS-v4-Large", "tokenizer/tokenizer_config.json", "音声モデル v4-Large(トークナイザ設定)"),
-    (
-        "Aratako/Irodori-TTS-500M-v2-VoiceDesign",
-        "model.safetensors",
-        "音声モデル VoiceDesign",
-    ),
-    (
-        "Aratako/Irodori-TTS-600M-v3-VoiceDesign",
-        "model.safetensors",
-        "音声モデル VoiceDesign v3",
-    ),
+COMMON_TARGETS = [
     ("Aratako/Semantic-DACVAE-Japanese-32dim", None, "音声コーデック DACVAE"),
     # トークナイザは世代で違う。configs/train_*_lora.yaml の
     # text_tokenizer_repo / caption_tokenizer_repo が実体で、
@@ -170,11 +147,41 @@ def fetch_with_retry(repo_id: str, filename: str | None) -> None:
     with_retry(lambda: fetch(repo_id, filename))
 
 
-def main() -> int:
-    total = len(TARGETS) + 1
+def model_targets(model_ids: list[str]) -> list[tuple[str, str, str]]:
+    import model_catalog
+
+    out = []
+    for mid in model_ids:
+        m = model_catalog.BY_ID[mid]
+        for repo, filename in m["files"]:
+            out.append((repo, filename, f"音声モデル {m['label']}" + ("" if filename.endswith("model.safetensors") else "（付属ファイル）")))
+    return out
+
+
+def parse_model_ids(argv: list[str]) -> list[str]:
+    """--models id,id,...。無ければ以前の版と同じ一式（setup.bat の開発版はこれ）。"""
+    import model_catalog
+
+    if "--models" in argv:
+        raw = argv[argv.index("--models") + 1] if argv.index("--models") + 1 < len(argv) else ""
+        ids = [x for x in raw.split(",") if x]
+    else:
+        ids = list(model_catalog.LEGACY_IDS)
+    unknown = [x for x in ids if x not in model_catalog.BY_ID]
+    if unknown:
+        raise SystemExit(f"知らないモデル: {', '.join(unknown)}")
+    return ids
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = list(sys.argv[1:] if argv is None else argv)
+    # 設定画面から1つだけ取るときは、共通の部品はもう揃っているので取らない。
+    with_common = "--no-common" not in args
+    targets = model_targets(parse_model_ids(args)) + (COMMON_TARGETS if with_common else [])
+    total = len(targets) + (1 if with_common else 0)
     failed: list[str] = []
 
-    for i, (repo_id, filename, label) in enumerate(TARGETS, 1):
+    for i, (repo_id, filename, label) in enumerate(targets, 1):
         print(f"[{i}/{total}] {label} ... ", end="", flush=True)
         try:
             fetch_with_retry(repo_id, filename)
@@ -184,16 +191,17 @@ def main() -> int:
             print(f"        {type(exc).__name__}: {exc}")
             failed.append(label)
 
-    print(f"[{total}/{total}] 話者照合モデル ECAPA（かんたん学習用） ... ",
-          end="", flush=True)
-    try:
-        # 他と同じだけ粘る。1ファイルの瞬断でセットアップ全体を終わらせない。
-        with_retry(fetch_ecapa)
-        print("OK")
-    except Exception as exc:  # noqa: BLE001
-        print("失敗")
-        print(f"        {type(exc).__name__}: {exc}")
-        failed.append("話者照合モデル ECAPA")
+    if with_common:
+        print(f"[{total}/{total}] 話者照合モデル ECAPA（かんたん学習用） ... ",
+              end="", flush=True)
+        try:
+            # 他と同じだけ粘る。1ファイルの瞬断でセットアップ全体を終わらせない。
+            with_retry(fetch_ecapa)
+            print("OK")
+        except Exception as exc:  # noqa: BLE001
+            print("失敗")
+            print(f"        {type(exc).__name__}: {exc}")
+            failed.append("話者照合モデル ECAPA")
 
     print()
     if failed:

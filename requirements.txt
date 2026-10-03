@@ -27,6 +27,9 @@ torchdata>=0.11.0
 # 学習の高速化（ブロック単位の torch.compile、train._compile_blocks）。
 # Windows 版の Triton。torch 2.10 に合うのは 3.6 系。同梱の TinyCC で動くので MSVC は要らない。
 triton-windows>=3.6,<3.7; sys_platform == "win32"
+# v4-Large の量子化版（Aratako/Irodori-TTS-v4-Large-Quantized）を読むため。
+# 上流の pyproject と同じ版の幅。Windows は純 Python の wheel で入る。
+torchao>=0.16,<0.17
 transformers>=5.12.1,<6
 tqdm>=4.67.3
 wandb>=0.17.0

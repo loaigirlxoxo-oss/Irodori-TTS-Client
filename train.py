@@ -1916,19 +1916,17 @@ def _cap_vram(device: torch.device) -> None:
 
     Windows のドライバは VRAM が足りないと本体のメモリへ黙って退避する。そうなると学習は
     止まらずに 9 倍以上遅くなり、本体の RAM まで使い切って PC 全体が重くなった（実測）。
-    PyTorch の確保をこの割合までに抑え、溢れる設定はその場で失敗させる。
-    IRODORI_VRAM_FRACTION=0 で外す。
+    上限は学習を始める時点の空きに合わせる（irodori_tts/vram_guard.py）。ほかのアプリが
+    VRAM を使っていれば、そのぶん下がる。IRODORI_VRAM_FRACTION=0 で外す。
     """
-    if device.type != "cuda" or not torch.cuda.is_available():
+    from irodori_tts import vram_guard
+
+    limit = vram_guard.apply(device)
+    if limit is None:
         return
-    fraction = float(os.environ.get("IRODORI_VRAM_FRACTION", "0.95") or 0)
-    if fraction <= 0:
-        return
-    index = device.index if device.index is not None else torch.cuda.current_device()
-    torch.cuda.set_per_process_memory_fraction(min(fraction, 1.0), index)
-    total = torch.cuda.get_device_properties(index).total_memory / 2**30
-    print(f"VRAM cap: {fraction:.2f} of {total:.1f} GB (overflow fails instead of spilling to system RAM).",
-          flush=True)
+    free = "" if limit["free_gib"] is None else f", free now {limit['free_gib']:.1f} GB"
+    print(f"VRAM cap: {limit['cap_gib']:.1f} GB of {limit['total_gib']:.1f} GB{free} "
+          "(overflow fails instead of spilling to system RAM).", flush=True)
 
 
 def setup_distributed(device_arg: str) -> tuple[int, int, int, bool, torch.device]:

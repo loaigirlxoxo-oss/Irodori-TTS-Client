@@ -60,6 +60,9 @@
                   <option value="v4_1">v4.1-Small（推奨）</option>
                   <option value="v4_1_anime">v4.1-Anime（アニメ調・非公式）</option>
                   <option value="v4_large">v4-Large</option>
+                  <option value="v4_large_int8">v4-Large 軽量 int8</option>
+                  <option value="v4_large_int4">v4-Large 軽量 int4</option>
+                  <option value="v4_large_fp8">v4-Large 軽量 float8</option>
                   <option value="v4">v4-Small</option>
                   <option value="v3">v3</option>
                   <option value="v2">v2</option>
@@ -1403,6 +1406,26 @@
         <button id="settings-close" class="sheet-x tip" data-tip="閉じる" aria-label="閉じる"><svg class="i i-sm"><use href="#ic-x"/></svg></button>
       </div>
       <div class="sheet-body">
+        <section class="settings-sec">
+          <h3 class="settings-h">音声モデル</h3>
+          <div class="settings-pc">この PC の GPU：<b id="models-gpu-name">—</b>　VRAM：<b id="models-gpu-vram">—</b></div>
+          <div class="tbl-wrap"><table id="models-table" class="models-table"></table></div>
+          <div class="settings-sum note">取得済みの合計：<b id="models-have-total">—</b></div>
+          <span id="models-status" class="note"></span>
+        </section>
+
+        <section class="settings-sec">
+          <h3 class="settings-h">アップデート</h3>
+          <div class="settings-update">
+            <span>いまの版：<b id="update-current">—</b></span>
+            <span id="update-latest" class="note"></span>
+            <button id="update-check" class="btn btn-ghost btn-sm">アップデートを確認</button>
+            <button id="update-run" class="btn btn-primary btn-sm hidden">ダウンロードして更新</button>
+          </div>
+          <p class="note">更新しても、音声モデル・登録した声・データセット・LoRA はそのまま残ります。</p>
+          <span id="update-status" class="note"></span>
+        </section>
+
         <section class="settings-sec">
           <h3 class="settings-h">電子透かしの入れ方</h3>
           <p class="note">生成した音声には必ず透かしが入ります。選べるのは、そのときに声をどう扱うかです。</p>

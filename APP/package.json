@@ -35,6 +35,7 @@
       "preload.js",
       "renderer.js",
       "runtime.js",
+      "updater.js",
       "index.html",
       "setup.html",
       "style.css",

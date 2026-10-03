@@ -93,6 +93,28 @@
 
   footer { flex-shrink:0; padding:0 30px 22px; color:var(--faint); font-size:12px; }
 
+  /* ══ 取得するモデルを選ぶ ══ 設定画面の表と同じ並び */
+  #choose { display:none; flex:1; min-height:0; padding:20px 30px 18px; flex-direction:column; }
+  body.choosing #choose { display:flex; }
+  body.choosing #progress, body.choosing footer { display:none; }
+  .pc { display:inline-flex; gap:14px; padding:5px 11px; border:1px solid var(--gold-dim); margin-bottom:10px; font-size:12.5px; align-self:flex-start; }
+  .pc b, .sum b { color:var(--gold); font-weight:400; font-variant-numeric:tabular-nums; }
+  .tbl { flex:1; min-height:0; overflow-y:auto; }
+  table { width:100%; border-collapse:collapse; font-size:12.5px; }
+  th { text-align:left; font-weight:400; color:var(--faint); font-size:11px; padding:5px 7px; border-bottom:1px solid var(--line); white-space:nowrap; }
+  td { padding:6px 7px; border-bottom:1px solid var(--line); }
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; white-space:nowrap; }
+  tr.group td { color:var(--faint); font-size:11px; padding-top:10px; border-bottom:none; }
+  tr.dis td { color:var(--faint); }
+  td .note { color:var(--muted); font-size:12px; }
+  .over { color:var(--gold); }
+  .have { color:var(--muted); font-size:11.5px; }
+  input[type=checkbox] { accent-color:var(--gold); width:15px; height:15px; vertical-align:middle; }
+  .sum { margin-top:10px; font-size:12.5px; color:var(--muted); }
+  .hint { margin-top:6px; font-size:12.5px; }
+  .go { align-self:flex-end; margin-top:10px; background:none; border:1px solid var(--gold); color:var(--gold); padding:7px 18px; font:inherit; cursor:pointer; }
+  .go:disabled { border-color:var(--line); color:var(--faint); cursor:default; }
+
   .err {
     margin:14px 30px 0; padding:11px 13px; display:none;
     background:rgba(208,102,102,.06); border:1px solid rgba(208,102,102,.45);
@@ -105,13 +127,22 @@
   <img class="wm" src="assets/logo.png" alt="Irodori-TTS">
 </div>
 
-<main>
+<section id="choose">
+  <h1>取得する音声モデルを選んでください</h1>
+  <div class="pc">この PC の GPU：<b id="gpu-name">—</b>　VRAM：<b id="gpu-vram">—</b></div>
+  <div class="tbl"><table id="models"></table></div>
+  <div class="sum">取得する容量：<b id="total">—</b></div>
+  <p class="hint">分からなければ、このまま進んで大丈夫です。あとから設定（右上の歯車）で足したり消したりできます。</p>
+  <button id="go" class="go">この内容で準備を始める</button>
+</section>
+
+<main id="progress">
   <h1>はじめの準備をしています</h1>
 
   <ul class="steps">
     <li id="s1"><span class="mark">1</span><span>ランタイムを用意する</span></li>
     <li id="s2"><span class="mark">2</span><span>ライブラリを入れる</span></li>
-    <li id="s3"><span class="mark">3</span><span>音声モデルを取得する（約30GB）</span></li>
+    <li id="s3"><span class="mark">3</span><span>音声モデルを取得する</span></li>
   </ul>
 
   <div class="rule"><i></i></div>
@@ -148,6 +179,50 @@
     bar.style.width = `${Math.round(((p.index - 1) / p.total) * 100)}%`;
     els[p.index].lastElementChild.textContent = p.step;
     if (p.detail !== undefined) detail.textContent = p.detail;
+  });
+
+  // 取得するモデルを選ぶ。一覧は model_catalog.py から来る（設定画面の表と同じ中身）。
+  window.irodoriSetup.onChooseModels((c) => {
+    const gpu = c.gpu || {};
+    document.getElementById('gpu-name').textContent = gpu.name || 'GPU なし';
+    document.getElementById('gpu-vram').textContent = gpu.vram_gb ? `${gpu.vram_gb}GB` : '—';
+    let h = '<tr><th>取得</th><th>モデル</th><th class="num">容量</th><th class="num">生成時の VRAM</th></tr>';
+    let group = '';
+    // 前の版から上げた人（もう何か持っている人）には、新しいモデルを勝手に足さない。
+    const fresh = !c.models.some((m) => m.downloaded);
+    for (const m of c.models) {
+      if (m.group !== group) { group = m.group; h += `<tr class="group"><td></td><td colspan="3">${group}</td></tr>`; }
+      let vram;
+      if (!m.runnable) vram = 'この GPU では動きません';
+      else if (m.vram_gb == null) vram = '—';
+      else {
+        const over = gpu.vram_gb && m.vram_gb > gpu.vram_gb;
+        vram = `<span class="${over ? 'over' : ''}">${m.vram_gb.toFixed(1)}GB${over ? ' ⚠ 足りません' : ''}</span>`;
+      }
+      // 取得済みのものは外せない（ここは足す画面。消すのは設定画面）。
+      const checked = m.downloaded || (fresh && m.default && m.runnable);
+      const box = `<input type="checkbox" value="${m.id}" data-gb="${m.downloaded ? 0 : m.size_gb}" ${checked ? 'checked' : ''} ${m.runnable && !m.downloaded ? '' : 'disabled'}>`;
+      h += `<tr class="${m.runnable ? '' : 'dis'}"><td>${box}</td><td>${m.label}<span class="note">（${m.note}）</span>${m.downloaded ? ' <span class="have">取得済み</span>' : ''}</td>`
+         + `<td class="num">${m.size_gb.toFixed(1)}GB</td><td class="num">${vram}</td></tr>`;
+    }
+    const table = document.getElementById('models');
+    table.innerHTML = h;
+    const boxes = () => [...table.querySelectorAll('input[type=checkbox]')];
+    const allHave = !fresh;
+    const refresh = () => {
+      const picked = boxes().filter((b) => b.checked);
+      const gb = picked.reduce((s, b) => s + Number(b.dataset.gb), 0);
+      document.getElementById('total').textContent = `約${Math.round(gb + (allHave ? 0 : c.common_gb))}GB`
+        + (allHave ? '' : `（共通の部品 約${Math.round(c.common_gb)}GB を含む）`);
+      document.getElementById('go').disabled = picked.length === 0;
+    };
+    table.addEventListener('change', refresh);
+    refresh();
+    document.body.classList.add('choosing');
+    document.getElementById('go').onclick = () => {
+      document.body.classList.remove('choosing');
+      window.irodoriSetup.sendChosenModels(boxes().filter((b) => b.checked).map((b) => b.value));
+    };
   });
 
   window.irodoriSetup.onError((message) => {
