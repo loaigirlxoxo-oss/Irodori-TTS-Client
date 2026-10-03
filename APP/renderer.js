@@ -1307,7 +1307,11 @@ function setupSettings() {
   const open = document.getElementById('settings-btn');
   const close = document.getElementById('settings-close');
   if (!modal || !open || !close) return;
-  open.addEventListener('click', () => { modal.classList.remove('hidden'); loadWatermarkChoice(); });
+  open.addEventListener('click', () => {
+    modal.classList.remove('hidden');
+    document.getElementById('wm-status').textContent = '';
+    loadWatermarkChoice();
+  });
   close.addEventListener('click', () => modal.classList.add('hidden'));
   modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
 }
@@ -1333,7 +1337,6 @@ async function loadWatermarkChoice() {
       label.append(input, ` ${c.label}`);
       box.appendChild(label);
     }
-    status.textContent = '';
   } catch (err) {
     status.textContent = `読み込めませんでした: ${err.message || err}`;
   }
