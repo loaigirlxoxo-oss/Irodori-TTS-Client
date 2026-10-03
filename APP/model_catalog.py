@@ -89,7 +89,12 @@ def is_downloaded(model_id: str) -> bool:
     """必要なファイルが全部キャッシュにあるか。ネットワークには行かない。"""
     from huggingface_hub import hf_hub_download
 
+    from data_paths import manual_checkpoint
+
     for repo, filename in BY_ID[model_id]["files"]:
+        # 手で置いた重み（models/manual/<リポジトリ名>/）も取得済みに数える。
+        if filename == "model.safetensors" and manual_checkpoint(repo) is not None:
+            continue
         try:
             hf_hub_download(repo_id=repo, filename=filename, local_files_only=True)
         except Exception:  # noqa: BLE001 - 無いのと同じに扱う
