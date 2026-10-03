@@ -41,6 +41,7 @@ Irodori-TTS Client App は、他の方が作ったソフトウェアとモデル
 | `Aratako/Irodori-TTS-v4-Small` | 音声モデル v4 | MIT |
 | `Aratako/Irodori-TTS-v4.1-Small` | 音声モデル v4.1（既定） | MIT |
 | `Aratako/Irodori-TTS-v4-Large` | 音声モデル v4-Large | [Gemma Terms of Use](https://ai.google.dev/gemma/terms)（[Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy) を含む） |
+| `Aratako/Irodori-TTS-v4-Large-Quantized` | 音声モデル v4-Large の軽量版（int8 / int4 / float8。選んだときだけ取得） | [Gemma Terms of Use](https://ai.google.dev/gemma/terms)（[Prohibited Use Policy](https://ai.google.dev/gemma/prohibited_use_policy) を含む） |
 | `Aratako/Irodori-TTS-500M-v2-VoiceDesign` | VoiceDesign v2 | MIT |
 | `Aratako/Irodori-TTS-600M-v3-VoiceDesign` | VoiceDesign v3 | MIT |
 | `Aratako/Semantic-DACVAE-Japanese-32dim` | 音声コーデック | MIT |
@@ -76,6 +77,7 @@ AMD (Radeon) を選んだ場合は、AMD が配布する Windows 向け PyTorch 
 `repo.radeon.com` から取得します。いずれも本アプリは再配布していません。
 学習の高速化に使う `triton-windows`（MIT。C コンパイラとして TinyCC〔LGPL-2.1〕を同梱）も、
 NVIDIA の GPU の環境で同じように PyPI から取得します。
+v4-Large の軽量版を読み込む `torchao`（BSD-3-Clause）も、同じように PyPI から取得します。
 
 ### 任意で追加できるモデル
 
