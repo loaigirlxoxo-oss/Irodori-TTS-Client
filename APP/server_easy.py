@@ -15,6 +15,7 @@ import re
 import shutil
 import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
 from pathlib import Path
@@ -1271,17 +1272,22 @@ def _run_train(easy_id: str, req: TrainRequest) -> None:
 
     status = _read_status(easy_id) or {}
     try:
-        cfg = _http("GET", f"/datasets/{_q(req.dataset)}/auto_config")
+        # 学習タブと同じ決め方にする。compile_blocks を付けて聞くと、v4-Large で
+        # compile が使えるときは 8本×4回・参照 30 秒の組が返る。ここだけ 4本×8回・
+        # 参照 120 秒・compile なしで走らせると 1 ステップ約 5.7 秒（学習タブは約 1.8 秒）。
+        q = urllib.parse.urlencode({"base": req.base, "compile_blocks": "true"})
+        cfg = _http("GET", f"/datasets/{_q(req.dataset)}/auto_config?{q}")
         rec = cfg.get("recommended", {})
         max_steps = req.max_steps or int(rec.get("max_steps") or 600)
         save_every = req.save_every or int(rec.get("save_every") or 100)
-        batch_size, accum = _train_batch_size()
+        batch_size = int(rec["batch_size"])
+        accum = int(rec["gradient_accumulation_steps"])
         status["batch_size"] = batch_size
 
         status.update(state="training", train_total=max_steps)
         _write_status(easy_id, status)
 
-        job = _http("POST", "/lora/jobs", {
+        job_body = {
             "easy_token": INTERNAL_TOKEN,
             "lora_name": req.lora_name,
             "dataset": req.dataset,
@@ -1291,7 +1297,12 @@ def _run_train(easy_id: str, req: TrainRequest) -> None:
             "save_every": save_every,
             "batch_size": batch_size,
             "gradient_accumulation_steps": accum,
-        })
+        }
+        if rec.get("ref_max_seconds") is not None:
+            # 参照を 30 秒に絞るのは、8本ずつ compile する組のとき（16GB に収めるため）
+            job_body["compile_blocks"] = True
+            job_body["ref_max_seconds"] = float(rec["ref_max_seconds"])
+        job = _http("POST", "/lora/jobs", job_body)
         train_id = job["job_id"]
         status["train_job"] = train_id
         _write_status(easy_id, status)
