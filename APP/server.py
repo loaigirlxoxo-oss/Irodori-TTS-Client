@@ -50,6 +50,7 @@ def listen_port() -> int:
 import server_dataset  # Dataset CRUD endpoints
 import server_easy  # かんたん学習（生成→データセット→学習→採用）
 import server_train  # LoRA training job management
+import watermark_settings  # 透かしの入れ方（外せない。声の扱いだけ選ぶ）
 from data_paths import (data_root, outputs_dir, voices_metadata_path, migrate_legacy_voices,
                         manual_checkpoint, OPTIONAL_MODELS,
                         missing_optional_model_message)
@@ -425,6 +426,23 @@ async def get_output_file(filename: str):
         return FileResponse(path=file_path, media_type="audio/wav")
     return JSONResponse(status_code=404, content={"error": "File not found"})
 
+# 透かしの入れ方。設定画面から選ぶ。外す選択肢は無い。
+@app.get("/api/v1/watermark")
+async def get_watermark():
+    return {"choice": watermark_settings.load_choice(),
+            "choices": [{"id": k, "label": v["label"]} for k, v in watermark_settings.CHOICES.items()]}
+
+
+@app.put("/api/v1/watermark")
+async def put_watermark(request: Request):
+    try:
+        body = await request.json()
+        watermark_settings.save_choice(str(body.get("choice")))
+    except (ValueError, AttributeError) as exc:
+        return JSONResponse(status_code=400, content={"error": str(exc)})
+    return {"choice": watermark_settings.load_choice()}
+
+
 # 生成タブの「メタデータ読込」。wav に埋めた生成条件を返す。
 # seed は 63bit で JavaScript の数値に入らない（丸められて別の音になる）ので文字列で返す。
 @app.post("/api/v1/wav_meta")
@@ -734,6 +752,8 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
                 req_kwargs["caption"] = caption
                 req_kwargs["max_caption_len"] = max_caption_len
 
+            wm_choice = watermark_settings.load_choice()
+            req_kwargs.update(watermark_settings.request_kwargs(wm_choice))
             request_obj = SamplingRequest(**req_kwargs)
             # 生成は数秒〜十数秒ブロックする。async ハンドラから直に呼ぶと
             # イベントループごと止まり、生成中は /status も含めて全エンドポイントが
@@ -757,6 +777,7 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
             # 参照なし・VoiceDesign は None。読み込み側はキーの有無で、
             # 記録する前のファイルか「参照なしで作った」かを見分ける。
             "voice_name": None if is_voice_design_model(model_type) else ref_voice_name,
+            "watermark": wm_choice,
             "num_steps": num_steps,
             "duration_scale": duration_scale,
             # CFG は音を大きく変える。これが無いと seed だけ合わせても
@@ -996,6 +1017,7 @@ async def openai_audio_speech(request: Request):
                 "trim_tail": True,
             }
 
+            req_kwargs.update(watermark_settings.request_kwargs(watermark_settings.load_choice()))
             request_obj = SamplingRequest(**req_kwargs)
             # 生成は数秒〜十数秒ブロックする。async ハンドラから直に呼ぶと
             # イベントループごと止まり、生成中は /status も含めて全エンドポイントが

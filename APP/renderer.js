@@ -689,6 +689,7 @@ async function init() {
   setupTrainTab();
   setupSynthSaveFolder();
   setupMetaImport();
+  setupSettings();
   // 学習は Train タブを離れても続く。生成側でも状態を持っておく。
   pollTrainingBusy();
   setInterval(pollTrainingBusy, 3000);
@@ -1297,6 +1298,59 @@ async function attachRefWav(formData) {
     formData.append('voice_name', selectedVoice.name);
   } catch (err) {
     console.error('Failed to attach ref wav', err);
+  }
+}
+
+// ── 設定 ────────────────────────────────────────────────────────
+function setupSettings() {
+  const modal = document.getElementById('settings-modal');
+  const open = document.getElementById('settings-btn');
+  const close = document.getElementById('settings-close');
+  if (!modal || !open || !close) return;
+  open.addEventListener('click', () => { modal.classList.remove('hidden'); loadWatermarkChoice(); });
+  close.addEventListener('click', () => modal.classList.add('hidden'));
+  modal.addEventListener('click', (e) => { if (e.target === modal) modal.classList.add('hidden'); });
+}
+
+// 透かしの入れ方。外す選択肢はサーバ側にも無い（watermark_settings.py）。
+async function loadWatermarkChoice() {
+  const box = document.getElementById('wm-choices');
+  const status = document.getElementById('wm-status');
+  try {
+    const res = await fetch(`${API_URL}/watermark`);
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || `status ${res.status}`);
+    box.innerHTML = '';
+    for (const c of json.choices) {
+      const label = document.createElement('label');
+      label.className = 'chk-line';
+      const input = document.createElement('input');
+      input.type = 'radio';
+      input.name = 'wm-choice';
+      input.value = c.id;
+      input.checked = c.id === json.choice;
+      input.addEventListener('change', () => saveWatermarkChoice(c.id));
+      label.append(input, ` ${c.label}`);
+      box.appendChild(label);
+    }
+    status.textContent = '';
+  } catch (err) {
+    status.textContent = `読み込めませんでした: ${err.message || err}`;
+  }
+}
+
+async function saveWatermarkChoice(choice) {
+  const status = document.getElementById('wm-status');
+  try {
+    const res = await fetch(`${API_URL}/watermark`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ choice }),
+    });
+    const json = await res.json();
+    if (!res.ok) throw new Error(json.error || `status ${res.status}`);
+    status.textContent = '保存しました。次の生成から使います。';
+  } catch (err) {
+    status.textContent = `保存できませんでした: ${err.message || err}`;
+    loadWatermarkChoice();
   }
 }
 

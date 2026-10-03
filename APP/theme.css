@@ -1502,3 +1502,8 @@ textarea, .glass-textarea { height:auto; padding:8px 10px; font-size:14px; line-
 /* どちらへ動かすと何が起きるかを、つまみの両端に出す */
 .easy-ends { display:flex; justify-content:space-between; margin-top:2px;
   font-size:10px; color:var(--faint); }
+
+/* 設定のシート */
+.settings-sec { padding:14px 18px 18px; }
+.settings-h { font-size:13px; font-weight:400; letter-spacing:.1em; color:var(--gold); margin:0 0 6px; }
+.settings-choices { display:flex; flex-direction:column; gap:6px; margin:10px 0 6px; }

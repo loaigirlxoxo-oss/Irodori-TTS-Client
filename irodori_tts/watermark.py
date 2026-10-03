@@ -2,12 +2,67 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterable
+from dataclasses import dataclass
 
 import torch
 
 logger = logging.getLogger(__name__)
 
 IRODORI_WATERMARK_PAYLOAD = (73, 82, 68, 84, 83)  # "IRDTS"
+
+# SilentCipher's 44.1k model only works at 44.1 kHz, while the codec emits 48 kHz.
+#   resample : 48k -> 44.1k -> watermark -> 48k. The voice itself is resampled twice.
+#   native44 : 48k -> 44.1k -> watermark, and the output stays 44.1 kHz (one resample).
+#   delta    : watermark a 44.1k copy, take only the difference, resample that
+#              difference to 48k and add it to the untouched 48k voice.
+# The watermark payload is identical in all three; only what happens to the voice differs.
+WATERMARK_MODES = ("resample", "native44", "delta")
+_MODEL_SR = 44100
+
+
+@dataclass(frozen=True)
+class WatermarkSpec:
+    mode: str = "resample"
+    # How far below the signal the watermark sits (SilentCipher message_sdr, dB).
+    # None keeps the model's own default (47 dB). Measured on four voices: 55 is the
+    # weakest that still decodes on all of them; 60 and above no longer decodes.
+    strength_db: float | None = None
+    # delta only: keep the watermark inside (low, high) Hz. low <= 0 means no
+    # high-pass. Narrow bands stop decoding on some voices, so this is for experiments.
+    band_hz: tuple[float, float] | None = None
+
+    def __post_init__(self) -> None:
+        if self.mode not in WATERMARK_MODES:
+            raise ValueError(f"Unsupported watermark mode={self.mode!r}. Expected one of: {WATERMARK_MODES}.")
+        if self.band_hz is not None:
+            low, high = self.band_hz
+            if not (0 <= low < high):
+                raise ValueError(f"Invalid watermark band={self.band_hz!r}.")
+            if self.mode != "delta":
+                raise ValueError("A watermark band can only be used with mode='delta'.")
+
+
+def _resample(audio: torch.Tensor, src: int, dst: int) -> torch.Tensor:
+    if src == dst:
+        return audio
+    import torchaudio
+
+    return torchaudio.functional.resample(audio.view(1, -1), src, dst).view(-1)
+
+
+def _band_limit(audio: torch.Tensor, *, sample_rate: int, band_hz: tuple[float, float]) -> torch.Tensor:
+    # Zero-phase 8th-order Butterworth, the same filter the band measurements used.
+    import numpy as np
+    from scipy.signal import butter, sosfiltfilt
+
+    low, high = band_hz
+    high = min(float(high), sample_rate / 2 * 0.999)
+    if low > 0:
+        sos = butter(8, [float(low), high], btype="band", fs=sample_rate, output="sos")
+    else:
+        sos = butter(8, high, btype="low", fs=sample_rate, output="sos")
+    filtered = sosfiltfilt(sos, audio.detach().cpu().double().numpy())
+    return torch.from_numpy(np.ascontiguousarray(filtered)).to(audio.dtype)
 
 
 def _as_single_channel_vector(audio: torch.Tensor) -> torch.Tensor | None:
@@ -53,30 +108,56 @@ class SilentCipherWatermarker:
     def ready(self) -> bool:
         return self.model is not None
 
+    def _encode(self, vector: torch.Tensor, sample_rate: int, payload: list[int],
+                strength_db: float | None) -> torch.Tensor:
+        encoded, _ = self.model.encode_wav(
+            vector.to(self.model.device),
+            int(sample_rate),
+            payload,
+            message_sdr=strength_db,
+            calc_sdr=False,
+        )
+        return torch.as_tensor(encoded, dtype=torch.float32, device="cpu").reshape(-1)
+
     def encode_one(
         self,
         audio: torch.Tensor,
         *,
         sample_rate: int,
+        spec: WatermarkSpec = WatermarkSpec(),
         payload: Iterable[int] = IRODORI_WATERMARK_PAYLOAD,
-    ) -> torch.Tensor:
+    ) -> tuple[torch.Tensor, int]:
+        """Watermark one clip. Returns (audio, sample_rate); native44 changes the rate."""
         if self.model is None:
-            return audio
+            return audio, int(sample_rate)
 
         vector = _as_single_channel_vector(audio)
         if vector is None:
-            return audio
+            return audio, int(sample_rate)
 
-        encoded, _ = self.model.encode_wav(
-            vector.to(self.model.device),
-            int(sample_rate),
-            list(payload),
-            calc_sdr=False,
-        )
-        encoded_audio = torch.as_tensor(encoded, dtype=torch.float32, device="cpu")
-        return _match_original_rank(encoded_audio, reference=audio)
+        sr = int(sample_rate)
+        payload = list(payload)
+        if spec.mode == "resample":
+            out, out_sr = self._encode(vector, sr, payload, spec.strength_db)[: vector.numel()], sr
+        elif spec.mode == "native44":
+            copy44 = _resample(vector.cpu(), sr, _MODEL_SR)
+            out, out_sr = self._encode(copy44, _MODEL_SR, payload, spec.strength_db), _MODEL_SR
+        else:  # delta
+            copy44 = _resample(vector.cpu(), sr, _MODEL_SR)
+            diff44 = self._encode(copy44, _MODEL_SR, payload, spec.strength_db)[: copy44.numel()] - copy44
+            diff = _resample(diff44, _MODEL_SR, sr)
+            diff = torch.nn.functional.pad(diff, (0, max(0, vector.numel() - diff.numel())))[: vector.numel()]
+            if spec.band_hz is not None:
+                diff = _band_limit(diff, sample_rate=sr, band_hz=spec.band_hz)
+            out, out_sr = vector.cpu() + diff, sr
+        return _match_original_rank(out, reference=audio), out_sr
 
-    def encode_batch(self, audios: list[torch.Tensor], *, sample_rate: int) -> list[torch.Tensor]:
+    def encode_batch(self, audios: list[torch.Tensor], *, sample_rate: int,
+                     spec: WatermarkSpec = WatermarkSpec()) -> tuple[list[torch.Tensor], int]:
         if self.model is None:
-            return audios
-        return [self.encode_one(audio, sample_rate=sample_rate) for audio in audios]
+            return audios, int(sample_rate)
+        out, out_sr = [], int(sample_rate)
+        for audio in audios:
+            encoded, out_sr = self.encode_one(audio, sample_rate=sample_rate, spec=spec)
+            out.append(encoded)
+        return out, out_sr

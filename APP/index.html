@@ -38,6 +38,7 @@
 
       <div class="hdr-end">
         <span class="status-badge" id="status-badge">Connecting...</span>
+        <button id="settings-btn" class="btn btn-ghost btn-sm tip" data-tip="設定" aria-label="設定"><svg class="i i-sm"><use href="#ic-gear"/></svg></button>
       </div>
     </header>
 
@@ -1394,6 +1395,24 @@
   </div>
 
   <!-- LoRA 管理モーダル -->
+  <!-- 設定。普段は使わないものをここへ集める（音声モデルの取得・アップデートもここに足す） -->
+  <div id="settings-modal" class="veil hidden">
+    <div class="sheet">
+      <div class="sheet-hd">
+        <span class="cap">設定</span><span class="sp"></span>
+        <button id="settings-close" class="sheet-x tip" data-tip="閉じる" aria-label="閉じる"><svg class="i i-sm"><use href="#ic-x"/></svg></button>
+      </div>
+      <div class="sheet-body">
+        <section class="settings-sec">
+          <h3 class="settings-h">電子透かしの入れ方</h3>
+          <p class="note">生成した音声には必ず透かしが入ります。選べるのは、そのときに声をどう扱うかです。</p>
+          <div id="wm-choices" class="settings-choices"></div>
+          <span id="wm-status" class="note"></span>
+        </section>
+      </div>
+    </div>
+  </div>
+
   <div id="lora-modal" class="veil hidden">
     <div class="sheet">
 

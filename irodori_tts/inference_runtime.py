@@ -42,7 +42,7 @@ from .speaker_inversion import (
 )
 from .text_normalization import normalize_text
 from .tokenizer import PretrainedTextTokenizer
-from .watermark import SilentCipherWatermarker
+from .watermark import SilentCipherWatermarker, WatermarkSpec
 
 
 def _is_mps_available() -> bool:
@@ -251,6 +251,11 @@ class SamplingRequest:
     tail_std_threshold: float = 0.05
     tail_mean_threshold: float = 0.1
     lora_adapter: str | None = None
+    # How the watermark is applied (see watermark.WatermarkSpec). The payload is
+    # always embedded; these only change what happens to the voice around it.
+    watermark_mode: str = "resample"
+    watermark_strength_db: float | None = None
+    watermark_band_hz: tuple[float, float] | None = None
 
 
 @dataclass
@@ -1514,11 +1519,17 @@ class InferenceRuntime:
             stage_timings.append(("decode_latent", stage_sec))
             _log(f"[runtime] decode_latent ({decode_mode}): {stage_sec * 1000.0:.1f} ms")
 
+            output_sample_rate = int(self.codec.sample_rate)
             if self.watermarker.ready:
                 t0 = _measure_start(self.codec_device)
-                trimmed_audios = self.watermarker.encode_batch(
+                trimmed_audios, output_sample_rate = self.watermarker.encode_batch(
                     trimmed_audios,
                     sample_rate=int(self.codec.sample_rate),
+                    spec=WatermarkSpec(
+                        mode=req.watermark_mode,
+                        strength_db=req.watermark_strength_db,
+                        band_hz=req.watermark_band_hz,
+                    ),
                 )
                 stage_sec = _measure_end(self.codec_device, t0)
                 stage_timings.append(("silentcipher_watermark", stage_sec))
@@ -1538,7 +1549,8 @@ class InferenceRuntime:
         return SamplingResult(
             audio=trimmed_audios[0],
             audios=trimmed_audios,
-            sample_rate=int(self.codec.sample_rate),
+            # native44 leaves the clip at 44.1 kHz.
+            sample_rate=output_sample_rate,
             stage_timings=stage_timings,
             total_to_decode=total_to_decode,
             used_seed=used_seed,
