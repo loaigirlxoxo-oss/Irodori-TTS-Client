@@ -250,12 +250,18 @@ class SamplingRequest:
     tail_window_size: int = 20
     tail_std_threshold: float = 0.05
     tail_mean_threshold: float = 0.1
+    # 切る位置のあとに残す余白（秒）。平坦になった点ちょうどで切ると、語尾の息や余韻が
+    # ぎりぎりで切れて聞こえる。生成した長さ（target_samples）は超えない。
+    tail_margin_seconds: float = 0.3
     lora_adapter: str | None = None
     # How the watermark is applied (see watermark.WatermarkSpec). The payload is
     # always embedded; these only change what happens to the voice around it.
     watermark_mode: str = "resample"
     watermark_strength_db: float | None = None
     watermark_band_hz: tuple[float, float] | None = None
+    # 学習用の素材を作るときだけ True。透かし入りの音声で学習すると LoRA が透かしの成分ごと覚え、
+    # 生成時にもう一度透かしが入って二重になる。外から渡せる項目ではない（server.py が内部の合言葉で決める）。
+    skip_watermark: bool = False
 
 
 @dataclass
@@ -1494,7 +1500,7 @@ class InferenceRuntime:
                         )
                         flattening_samples = int(
                             flattening_point * int(self.codec.model.hop_length)
-                        )
+                        ) + int(float(req.tail_margin_seconds) * int(self.codec.sample_rate))
                         if flattening_samples > 0:
                             max_samples = min(max_samples, flattening_samples)
                     trimmed_audios.append(audio_i[:, :max_samples])
@@ -1511,7 +1517,7 @@ class InferenceRuntime:
                         )
                         flattening_samples = int(
                             flattening_point * int(self.codec.model.hop_length)
-                        )
+                        ) + int(float(req.tail_margin_seconds) * int(self.codec.sample_rate))
                         if flattening_samples > 0:
                             max_samples = min(max_samples, flattening_samples)
                     trimmed_audios.append(audio_i[:, :max_samples])
@@ -1520,7 +1526,9 @@ class InferenceRuntime:
             _log(f"[runtime] decode_latent ({decode_mode}): {stage_sec * 1000.0:.1f} ms")
 
             output_sample_rate = int(self.codec.sample_rate)
-            if self.watermarker.ready:
+            if bool(req.skip_watermark):
+                _log("[runtime] silentcipher_watermark: skipped (training material)")
+            elif self.watermarker.ready:
                 t0 = _measure_start(self.codec_device)
                 trimmed_audios, output_sample_rate = self.watermarker.encode_batch(
                     trimmed_audios,

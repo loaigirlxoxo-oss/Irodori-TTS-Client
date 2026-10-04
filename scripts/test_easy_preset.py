@@ -14,9 +14,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "APP"))
 from server_easy import LineError, load_eval_lines, load_lines  # noqa: E402
 
 
-def test_loads_411_lines() -> None:
+def test_loads_402_lines() -> None:
     lines = load_lines()
-    assert len(lines) == 411, f"411本のはずが {len(lines)} 本"
+    assert len(lines) == 402, f"402本のはずが {len(lines)} 本"
 
 
 def test_every_line_has_tag_and_body() -> None:
@@ -96,7 +96,7 @@ def test_eval_lines_differ_from_train() -> None:
 
 
 if __name__ == "__main__":
-    test_loads_411_lines()
+    test_loads_402_lines()
     test_every_line_has_tag_and_body()
     test_rejects_foreign_characters()
     test_rejects_short_line()

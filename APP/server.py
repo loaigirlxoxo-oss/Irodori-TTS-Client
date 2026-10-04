@@ -820,6 +820,12 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
 
             wm_choice = watermark_settings.load_choice()
             req_kwargs.update(watermark_settings.request_kwargs(wm_choice))
+            # かんたん学習が学習用の素材と評価用の音声を作るときは、透かしを入れない。
+            # 透かし入りで学習すると、生成時の透かしと二重になる。合言葉は起動ごとに変わる
+            # 乱数で、外からの生成（API・生成タブ）はこれを持たないので、透かしは外せない。
+            if isinstance(data, dict) and data.get("easy_token") == server_easy.INTERNAL_TOKEN:
+                req_kwargs["skip_watermark"] = True
+                wm_choice = "none (training material)"
             request_obj = SamplingRequest(**req_kwargs)
             # 生成は数秒〜十数秒ブロックする。async ハンドラから直に呼ぶと
             # イベントループごと止まり、生成中は /status も含めて全エンドポイントが
