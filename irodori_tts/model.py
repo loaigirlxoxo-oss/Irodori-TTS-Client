@@ -1468,7 +1468,45 @@ class ConditionStateCache:
 
     def __init__(self, pad_ids: dict[str, int]) -> None:
         self.pad_ids = dict(pad_ids)
-        self.store: dict[str, dict[tuple, dict[str, torch.Tensor]]] = {"text": {}, "caption": {}}
+        # 本体メモリに置くときは {"norm", "drop"} のテンソル、ディスクに置くときは行の番号を持つ。
+        self.store: dict[str, dict[tuple, dict[str, torch.Tensor] | int]] = {"text": {}, "caption": {}}
+        # ディスクに置くとき: 種類ごとの np.memmap（行数, 2, 長さ, 次元×バイト数）と、元の型。
+        # 本体メモリが足りないデータセットでも使い回せるようにする（学習が終わったら消す）。
+        self.disk: dict[str, object] = {}
+        self.disk_dtype: dict[str, torch.dtype] = {}
+
+    def open_disk(self, kind: str, path, count: int, length: int, dim: int, dtype: torch.dtype) -> None:
+        import numpy as np
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        itemsize = torch.empty((), dtype=dtype).element_size()
+        # 型を変えずにバイトのまま置く（numpy に bfloat16 が無いため）。
+        self.disk[kind] = np.memmap(path, dtype=np.uint8, mode="w+", shape=(count, 2, length, dim * itemsize))
+        self.disk_dtype[kind] = dtype
+
+    def put(self, kind: str, key: tuple, norm: torch.Tensor, drop: torch.Tensor) -> None:
+        if kind not in self.disk:
+            self.store[kind][key] = {"norm": norm, "drop": drop}
+            return
+        index = len(self.store[kind])
+        for state, value in ((0, norm), (1, drop)):
+            self.disk[kind][index, state] = value.contiguous().view(torch.uint8).numpy()
+        self.store[kind][key] = index
+
+    def _row(self, kind: str, entry, dropped: bool, length: int) -> torch.Tensor:
+        if isinstance(entry, dict):
+            return entry["drop" if dropped else "norm"][:length]
+        import numpy as np
+
+        raw = np.array(self.disk[kind][entry, 1 if dropped else 0, :length])   # 必要な長さだけ読む
+        return torch.from_numpy(raw).view(self.disk_dtype[kind])
+
+    def close(self) -> None:
+        """ディスクのファイルを閉じる（Windows は開いたままだと消せない）。"""
+        for mm in self.disk.values():
+            mm.flush()
+            mm._mmap.close()
+        self.disk.clear()
 
     @staticmethod
     def make_key(ids_row: torch.Tensor, n: int, pad_id: int) -> tuple:
@@ -1496,7 +1534,7 @@ class ConditionStateCache:
                     "Build the cache from every dataset the run reads."
                 )
             dropped = n > 0 and not bool(mask[i].any().item())
-            rows.append(entry["drop" if dropped else "norm"][:length])
+            rows.append(self._row(kind, entry, dropped, length))
         return torch.stack(rows).to(device=ids.device, non_blocking=True)
 
 

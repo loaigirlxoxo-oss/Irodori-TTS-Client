@@ -176,6 +176,9 @@ class TrainConfig:
     checkpoint_best_n: int = 0
     valid_ratio: float = 0.0
     valid_every: int = 0
+    # Client 独自：検証の本を学習から外さない。検証の損失は画面に出すだけで、ステップ選びには
+    # 使っていないので、そのために素材を減らさない。選ばれた本は学習にも使う。
+    valid_from_train: bool = False
     progress: bool = True
     progress_all_ranks: bool = False
     precision: str = "bf16"

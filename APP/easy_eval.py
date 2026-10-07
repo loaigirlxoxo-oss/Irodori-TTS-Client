@@ -8,6 +8,7 @@ val_loss は当てにならないので使わない。声が似ているか（SI
 from __future__ import annotations
 
 import contextlib
+import math
 import sys
 import threading
 from collections import OrderedDict
@@ -260,8 +261,6 @@ def transcribe(wav_path: str) -> str:
 # 喘ぎは書き起こしが当てにならない（実在作品の台本と照合して CER 26〜29%）ので
 # 読み間違いに入れない。声の似ている度には入れる。
 NONVERBAL_TAGS = ("🥵", "🌬️")
-# これより短い本は声の特徴が安定しないので、似ている度に入れない。
-SIM_MIN_CHARS = 20
 # 合成の乱数。本ごとに決めて、どのチェックポイントにも同じ値を渡す。
 # 乱数が毎回変わると、同じチェックポイントでも長い文がたまたま崩れるかで
 # 読み間違いが 7% と 33% に分かれた（実測）。
@@ -275,7 +274,7 @@ def eval_seed(index: int) -> int:
 def score_lines(results: list[dict]) -> tuple[float, float]:
     """1チェックポイント分の (似ている度, 読み間違い) を出す。
 
-    results は本ごとの {"tag", "body", "heard", "sim"}（sim は測らなかった本では None）。
+    results は本ごとの {"tag", "body", "heard", "sim"}。似ている度は短い本も含めた全部の平均。
     読み間違いは間違えた字数の合計 / 全体の字数。本ごとの平均にすると、短い本の
     1字違いが 20% になって振れ、長い本の大崩れ（文の後に声が続いて 261%）が平均を
     支配する。1本の間違いはその本の字数で頭打ちにする。
@@ -322,7 +321,7 @@ def pick_by_score(rows: list[dict]) -> dict:
     top = max(combined_score(r) for r in rows)
     near = [r for r in rows if combined_score(r) >= top - SCORE_BAND]
     best = max(near, key=lambda r: r["step"])
-    return dict(best, score=combined_score(best), fallback=False)
+    return dict(best, score=combined_score(best))
 
 
 def release_runtime() -> bool:
@@ -417,21 +416,21 @@ def release_eval_models() -> bool:
 # させると、LoRA がその崩れごと覚える。採用の判断に使っているのと同じ
 # 道具（ECAPA と anime-whisper）を、素材の選別にも使う。
 
-# 読み間違いの上限。採用の判定（評価文の読み間違い）より緩くする。1本ずつの短い音声では
-# 書き起こしが揺れやすく、厳しくすると正常な本まで落ちるため。
+# 読み間違いの上限。1本ずつの短い音声では書き起こしが揺れやすく、厳しくすると正常な本まで
+# 落ちるので、緩めにする。
 CLIP_CER_LIMIT = 0.25
 
 # 声のぶれの許容。全体の中央値からこれだけ下がったら外れとみなす。
 # 絶対値で切らないのは、声によって SIM の出方が違うから。
 CLIP_SIM_MARGIN = 0.12
 
-# 落としすぎると素材が足りなくなる。ここを下回ったら選別を諦めて全部使う。
+# 落としすぎると素材が足りなくなる。基準を通った本がこの割合に満たないときは、
+# 落ちた本を点数（combined_score）の高い順に足して、この割合まで戻す。全部は使わない。
 CLIP_KEEP_MIN = 0.70
 
 # 評価そのものが失敗した本の許容割合。ECAPA のモデルが無い、書き起こしが
-# 落ちている、といった場合は全本が失敗値になり、全部を足切りに落としたうえで
-# 「諦めて全部使う」に倒れる。選別が一度も動いていないのに素通りするので、
-# 広範囲に失敗したら工程ごと止める。1本2本の揺らぎでは止めない。
+# 落ちている、といった場合は全本が失敗値になり、選別が一度も動かないまま
+# 学習に進んでしまう。広範囲に失敗したら工程ごと止める。1本2本の揺らぎでは止めない。
 CLIP_FAIL_MAX = 0.20
 
 
@@ -452,7 +451,7 @@ def screen_clips(
         path = clip["path"]
         try:
             sim = speaker_similarity(ref_wav, path)
-            err = cer(clip["text"], transcribe(path))
+            err = cer(clip.get("plain", clip["text"]), transcribe(path))   # 絵文字を外した文と比べる
             broke = False
         except Exception as exc:  # noqa: BLE001 - 1本の失敗で全体を止めない
             sim, err = 0.0, 1.0
@@ -486,15 +485,21 @@ def screen_clips(
         "dropped_sim": sum(1 for c in rated if c["sim"] < sim_floor),
         "dropped_cer": sum(1 for c in rated if c["cer"] > CLIP_CER_LIMIT),
         "failed": failed,
-        "gave_up": False,
+        "topped_up": 0,
     }
 
-    # 選別が効きすぎたら、基準の方を疑う。素材が足りない方が損。
-    # ただし戻すのは評価できた本だけ。測れなかった本は、無音や壊れている
-    # 可能性がそのまま残っているので、基準を緩めても入れてよい根拠が無い。
-    if len(kept) < len(rated) * CLIP_KEEP_MIN:
-        report["gave_up"] = True
-        report["kept"] = len(rated)
-        return rated, report
+    # 選別が効きすぎたら、上位 CLIP_KEEP_MIN までを使う。基準を通った本を先に入れ、
+    # 足りない分を、落ちた本の点数の高い順に足す。
+    # 足すのは評価できた本だけ。測れなかった本は、無音や壊れている可能性が
+    # そのまま残っているので、入れてよい根拠が無い。
+    want = math.ceil(len(rated) * CLIP_KEEP_MIN)
+    if len(kept) < want:
+        passed = {id(c) for c in kept}
+        rest = sorted((c for c in rated if id(c) not in passed), key=combined_score, reverse=True)
+        added = rest[: want - len(kept)]
+        report["topped_up"] = len(added)
+        report["kept"] = len(kept) + len(added)
+        keep_ids = passed | {id(c) for c in added}
+        return [c for c in rated if id(c) in keep_ids], report
 
     return kept, report

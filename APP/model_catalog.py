@@ -20,7 +20,7 @@ MODELS: list[dict] = [
     {"id": "v4_1", "label": "v4.1-Small", "note": "推奨", "group": "おすすめ", "default": True,
      "files": [("Aratako/Irodori-TTS-v4.1-Small", "model.safetensors")],
      "size_gb": 3.1, "vram_bf16": 4.0, "vram_fp32": 7.5, "need": None},
-    {"id": "v4_large_int8", "label": "v4-Large 軽量 int8", "note": "軽量", "group": "おすすめ", "default": True,
+    {"id": "v4_large_int8", "label": "v4-Large 軽量 int8", "note": "軽量・RTX 30 系以降必須", "group": "おすすめ", "default": True,
      "files": [(_Q, "int8-weight-only/model.safetensors"), (_Q, "tokenizer/tokenizer.json"),
                (_Q, "tokenizer/tokenizer_config.json")],
      "size_gb": 3.7, "vram_bf16": 6.0, "vram_fp32": None, "need": "bf16"},

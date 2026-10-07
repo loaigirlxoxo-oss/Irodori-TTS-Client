@@ -182,20 +182,27 @@ def _save_transcript(name: str, clips: list[tuple[int, str]]) -> None:
     tp.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _measure_total_duration(name: str) -> Optional[float]:
-    """クリップ全部の秒数を足す。wav を 1 本ずつ開くので速くない。"""
+def _measure_durations(name: str) -> Optional[tuple[float, int]]:
+    """クリップ全部の秒数の合計と、30秒を超えるクリップの本数。wav を 1 本ずつ開くので速くない。
+
+    学習は 1 本を 30 秒までしか使わない。超えるクリップは後ろが切り捨てられるので、学習タブで知らせる。
+    """
     import soundfile as sf
+    from server_audio import CLIP_MAX_SEC  # lazily: 起動時に音声まわりを読み込まない
 
     cdir = _clips_dir(name)
     total = 0.0
+    long_clips = 0
     found = False
     for idx in _list_clip_indices(name):
         try:
-            total += float(sf.info(str(cdir / f"{idx:04d}.wav")).duration)
-            found = True
+            seconds = float(sf.info(str(cdir / f"{idx:04d}.wav")).duration)
         except Exception:
             continue
-    return round(total, 3) if found else None
+        total += seconds
+        long_clips += seconds > CLIP_MAX_SEC
+        found = True
+    return (round(total, 3), long_clips) if found else None
 
 
 def _total_duration_cached(name: str, meta: dict) -> Optional[float]:
@@ -208,12 +215,14 @@ def _total_duration_cached(name: str, meta: dict) -> Optional[float]:
     """
     num = meta.get("num_clips")
     cached = meta.get("total_duration")
-    if cached is not None and meta.get("duration_for_clips") == num:
+    # long_clips は後から足した値。無い meta は 1 度だけ測り直す。
+    if cached is not None and meta.get("duration_for_clips") == num and "long_clips" in meta:
         return cached
 
-    dur = _measure_total_duration(name)
-    if dur is None:
+    measured = _measure_durations(name)
+    if measured is None:
         return None
+    dur, meta["long_clips"] = measured
     meta["total_duration"] = dur
     meta["duration_for_clips"] = num
     try:
@@ -380,9 +389,9 @@ def create_dataset(req: CreateDatasetRequest) -> JSONResponse:
     }
     # 保存し終えた直後はクリップが手元にあるので、ここで測っておく。
     # 一覧で初めて測ると、その 1 回だけ待たされることになる。
-    dur = _measure_total_duration(name)
-    if dur is not None:
-        meta["total_duration"] = dur
+    measured = _measure_durations(name)
+    if measured is not None:
+        meta["total_duration"], meta["long_clips"] = measured
         meta["duration_for_clips"] = len(saved_clips)
     _write_meta(name, meta)
 

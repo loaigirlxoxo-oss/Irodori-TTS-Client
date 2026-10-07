@@ -554,6 +554,33 @@
             <label for="easy-lora-name" style="margin-top:12px">この声につける名前</label>
             <input id="easy-lora-name" type="text" placeholder="みどり" />
 
+            <div class="two" style="margin-top:12px">
+              <div class="param-group">
+                <label for="easy-gen-model">素材を作るモデル</label>
+                <select id="easy-gen-model" title="決めた声で、学習用のセリフを読ませるモデル。フォルダの音声を使うときは使いません">
+                  <option value="v4_1">v4.1-Small（推奨）</option>
+                  <option value="v4_1_anime">v4.1-Anime（アニメ調・非公式）</option>
+                  <option value="v4_large">v4-Large</option>
+                  <option value="v4_large_int8">v4-Large 軽量 int8</option>
+                  <option value="v4_large_int4">v4-Large 軽量 int4</option>
+                  <option value="v4_large_fp8">v4-Large 軽量 float8</option>
+                  <option value="v4">v4-Small</option>
+                </select>
+              </div>
+              <div class="param-group">
+                <label for="easy-train-base">学習するモデル</label>
+                <select id="easy-train-base" title="LoRA を作るモデル。できた LoRA は、このモデル（v4-Large なら軽量版も）で使います">
+                  <option value="v4_1">v4.1-Small（推奨）</option>
+                  <option value="v4_1_anime">v4.1-Anime（アニメ調・非公式）</option>
+                  <option value="v4_large">v4-Large</option>
+                  <option value="v4">v4-Small</option>
+                </select>
+              </div>
+            </div>
+
+
+            <label class="chk" style="margin-top:12px"><input type="checkbox" id="easy-no-wm" checked> 学習の素材に電子透かしを入れない（おすすめ）</label>
+            <p id="easy-wm-note" class="note warn"></p>
 
             <details class="easy-fold" style="margin-top:12px">
               <summary>声の微調整</summary>
@@ -701,6 +728,7 @@
                 <button id="tr-stop-btn" class="btn btn-ghost btn-sm btn-danger hidden"><svg class="i i-sm"><use href="#ic-x"/></svg>停止</button>
               </div>
 
+              <p id="tr-job-error" class="note warn hidden" style="white-space:pre-line;"></p>
               <details>
                 <summary class="log-sum"><svg class="i i-sm chev"><use href="#ic-chev"/></svg>記録</summary>
                 <pre id="tr-job-log" class="log"></pre>
@@ -717,6 +745,7 @@
               <div class="param-group">
                 <label for="tr-dataset">データセット</label>
                 <select id="tr-dataset"></select>
+                <p id="tr-long-note" class="note warn hidden"></p>
               </div>
               <div class="param-group">
                 <label for="tr-lora-name">できる LoRA の名前</label>
@@ -758,19 +787,20 @@
                   <div class="ds-opt-hd">バッチ・VRAM</div>
                   <div class="two">
                     <div class="param-group">
-                      <label for="tr-batch-size">バッチサイズ <span class="en">1回に載せる本数</span></label>
+                      <label for="tr-batch-size">バッチサイズ <span class="sub">1回に載せる本数</span></label>
                       <input type="number" id="tr-batch-size" value="4" step="1" min="1" max="128" title="大きいほど VRAM を使う。足りないと極端に遅くなる">
                     </div>
                     <div class="param-group">
-                      <label for="tr-grad-accum">勾配の蓄積 <span class="en">回</span></label>
+                      <label for="tr-grad-accum">勾配の蓄積 <span class="sub">回</span></label>
                       <input type="number" id="tr-grad-accum" value="8" step="1" min="1" max="64" title="この回数ぶん溜めてから1回更新する。バッチサイズ×この値が実際のバッチ">
                     </div>
                   </div>
                   <label class="chk" title="VRAM を減らす代わりに遅くなる"><input type="checkbox" id="tr-grad-ckpt"> 勾配チェックポイント（VRAM を減らす・遅くなる）</label>
                   <label class="chk" title="計算をまとめて学習を速くする。最初の数ステップでコンパイルに数分かかる"><input type="checkbox" id="tr-compile"> 学習を速くする（最初にコンパイルで数分待つ）</label>
                   <p id="tr-compile-note" class="note hidden"></p>
+                  <p id="tr-memory-note" class="note hidden"></p>
                   <div class="param-group">
-                    <label for="tr-ref-max">参照音声の上限 <span class="en">秒</span></label>
+                    <label for="tr-ref-max">参照音声の上限 <span class="sub">秒</span></label>
                     <input type="number" id="tr-ref-max" step="1" min="1" max="120" title="学習で1本ごとに付ける参照音声（同じ声の別の音声をつないだもの）の最長。短いほど VRAM を使わない">
                   </div>
 
@@ -786,16 +816,16 @@
                     </div>
                   </div>
                     <div class="param-group">
-                      <label for="tr-lora-dropout">ドロップアウト <span class="en">0〜0.9</span></label>
+                      <label for="tr-lora-dropout">ドロップアウト <span class="sub">0〜0.9</span></label>
                       <input type="number" id="tr-lora-dropout" step="0.01" min="0" max="0.9" title="学習中に一部を休ませる割合。覚えすぎを抑える">
                     </div>
 
                   <div class="ds-opt-hd">検証・再現</div>
-                  <label class="chk" title="かんたん学習と同じ10文を読ませ、声の似ている度と読み間違いを測る"><input type="checkbox" id="tr-evaluate" checked> 学習のあと各ステップを測って、おすすめに印を付ける</label>
+                  <label class="chk" title="かんたん学習と同じ評価文 14本を読ませ、声の似ている度と読み間違いを測る"><input type="checkbox" id="tr-evaluate" checked> 学習のあと各ステップを測って、おすすめに印を付ける</label>
                   <div class="two">
                     <div class="param-group">
-                      <label for="tr-valid-clips">検証に取り分ける本数 <span class="en">0 = しない</span></label>
-                      <input type="number" id="tr-valid-clips" step="1" min="0" max="1000" title="学習に使わず、val の計算に回す本数">
+                      <label for="tr-valid-clips">検証の損失を測る本数 <span class="sub">0 = しない</span></label>
+                      <input type="number" id="tr-valid-clips" step="1" min="0" max="1000" title="val の計算に使う本数。学習に使う本の中から選ぶ（学習から外さない）">
                     </div>
                     <div class="param-group">
                       <label for="tr-seed">乱数の種 <span class="en"></span></label>
@@ -808,27 +838,27 @@
                   <div class="ds-opt-hd">学習率</div>
                   <div class="two">
                     <div class="param-group">
-                      <label for="tr-lr">学習率 <span class="en">本体</span></label>
+                      <label for="tr-lr">学習率 <span class="sub">本体</span></label>
                       <input type="text" id="tr-lr" title="1回の更新でどれだけ動かすか。大きいほど速く覚えるが崩れやすい">
                     </div>
                     <div class="param-group">
-                      <label for="tr-te-lr">テキスト側の学習率 <span class="en">読みの部分</span></label>
+                      <label for="tr-te-lr">テキスト側の学習率 <span class="sub">読みの部分</span></label>
                       <input type="text" id="tr-te-lr" title="文章を読む部分の学習率。学習範囲が「全体」のときに効く">
                     </div>
                   </div>
                   <div class="two">
                     <div class="param-group">
-                      <label for="tr-warmup-pct">ウォームアップ <span class="en">% ・最初に少しずつ上げる</span></label>
+                      <label for="tr-warmup-pct">ウォームアップ <span class="sub">% ・最初に少しずつ上げる</span></label>
                       <input type="number" id="tr-warmup-pct" step="1" min="0" max="50" title="全体のうち、学習率を0から上げていく割合">
                     </div>
                     <div class="param-group">
-                      <label for="tr-decay-pct">減衰 <span class="en">% ・最後に下げていく</span></label>
+                      <label for="tr-decay-pct">減衰 <span class="sub">% ・最後に下げていく</span></label>
                       <input type="number" id="tr-decay-pct" step="1" min="1" max="100" title="ウォームアップの後の残りのうち、最後に学習率を下げていく割合">
                     </div>
                   </div>
                   <div class="two">
                     <div class="param-group">
-                      <label for="tr-min-lr-scale">最低学習率 <span class="en">倍率</span></label>
+                      <label for="tr-min-lr-scale">最低学習率 <span class="sub">倍率</span></label>
                       <input type="number" id="tr-min-lr-scale" step="0.01" min="0" max="1" title="減衰の終わりで、学習率をここまで下げる（1 = 下げない）">
                     </div>
                     <div class="param-group">
@@ -848,7 +878,7 @@
             <div class="act-row">
               <button id="tr-start-btn" class="btn btn-primary"><svg class="i i-sm"><use href="#ic-spark"/></svg>学習を始める</button>
               <button id="tr-auto-setting-btn" class="btn btn-ghost btn-sm"
-                      title="データセットを分析して ステップ数 / 保存間隔 / 学習範囲に推奨値を入れます（学習は開始しません）">おまかせ設定</button>
+                      title="素材とこの PC を測って、ステップ数・保存間隔・学習範囲・バッチサイズ・勾配の蓄積・参照音声の上限などを入れます。バッチサイズは数ステップの試し走りで測るので、数分かかります（学習は開始しません）">おまかせ設定</button>
               <span id="tr-start-status" class="note"></span>
             </div>
           </section>
@@ -975,13 +1005,13 @@
                       <button id="ds-qwen-dl" class="btn btn-ghost btn-sm hidden">Qwen3-ASR を取得する</button>
                     </div>
                     <div class="param-group">
-                      <label>語彙のヒント <span class="en">Qwen3-ASR のみ</span></label>
+                      <label>語彙のヒント <span class="sub">Qwen3-ASR のみ</span></label>
                       <input type="text" id="ds-vocab" placeholder="、で区切って複数単語を指定できます。">
                     </div>
                     <div class="two">
                       <div class="param-group">
-                        <label>区切る間 <span class="en">秒</span></label>
-                        <input type="number" id="ds-chunk-gap" value="0.6" step="0.1" min="0.1" max="5" title="これより長い間の前後は、別々に書き起こしてつなぐ">
+                        <label>区切る間 <span class="sub">秒</span></label>
+                        <input type="number" id="ds-chunk-gap" value="0.6" step="0.1" min="0.1" max="5" title="これより長い間で、声の塊を分ける。Anime Whisper は音声を丸ごと読んだあと、塊ごとに読み残しを確かめて足す。28秒を超える音声は、塊ごとに書き起こす。Qwen3-ASR は 28秒以下なら丸ごと読むので、この値は効かない">
                       </div>
                       <div class="param-group">
                         <label>小声を拾う範囲 <span class="en">dB</span></label>
@@ -999,7 +1029,7 @@
                     <label class="chk"><input type="checkbox" id="ds-trim"> 各クリップの頭と尻の無音を切る</label>
                     <div class="two">
                       <div class="param-group">
-                        <label>残す余白 <span class="en">ミリ秒</span></label>
+                        <label>残す余白 <span class="sub">ミリ秒</span></label>
                         <input type="number" id="ds-trim-keep" value="100" step="50" min="0">
                       </div>
                       <div class="param-group">
@@ -1011,11 +1041,11 @@
                     <div class="ds-opt-hd">分割</div>
                     <div class="two">
                       <div class="param-group">
-                        <label>区切りの無音 <span class="en">ミリ秒</span></label>
+                        <label>区切りの無音 <span class="sub">ミリ秒</span></label>
                         <input type="number" id="ds-min-silence" value="500" step="100" min="0">
                       </div>
                       <div class="param-group">
-                        <label>前後の余白 <span class="en">ミリ秒</span></label>
+                        <label>前後の余白 <span class="sub">ミリ秒</span></label>
                         <input type="number" id="ds-speech-pad" value="400" step="50" min="0">
                       </div>
                     </div>

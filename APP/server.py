@@ -823,7 +823,10 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
             # かんたん学習が学習用の素材と評価用の音声を作るときは、透かしを入れない。
             # 透かし入りで学習すると、生成時の透かしと二重になる。合言葉は起動ごとに変わる
             # 乱数で、外からの生成（API・生成タブ）はこれを持たないので、透かしは外せない。
-            if isinstance(data, dict) and data.get("easy_token") == server_easy.INTERNAL_TOKEN:
+            # 透かしなしの素材は、かんたん学習が学習のあとで消す（server_easy._delete_materials）。
+            # 素材を残したい人は透かし入りを選ぶ（easy_watermark）。そのときはふつうに透かしを入れる。
+            if (isinstance(data, dict) and data.get("easy_token") == server_easy.INTERNAL_TOKEN
+                    and not data.get("easy_watermark")):
                 req_kwargs["skip_watermark"] = True
                 wm_choice = "none (training material)"
             request_obj = SamplingRequest(**req_kwargs)

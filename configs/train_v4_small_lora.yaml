@@ -103,4 +103,6 @@ train:
   lora_bias: none
   lora_target_modules: diffusion_attn
   lora_modules_to_save: auto
+  # 文章の読み取り部分（ModernBERT）の結果を先に計算して使い回し、GPU から降ろす（Client 独自。v4-Large と同じ仕組み）
+  lora_cache_condition_states: true
   seed: 0

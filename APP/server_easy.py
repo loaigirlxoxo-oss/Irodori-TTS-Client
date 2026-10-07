@@ -39,16 +39,33 @@ def user_lines_file() -> Path:
     data の下に写しを持ち、以降はそちらを読む。Electron 側も同じ場所を開く
     （main.js の getEasyLinesPath）ので、開いた先と読む先が必ず一致する。
 
-    写しは一度きり。ひな形を更新しても上書きしない。上書きすると、手で直した
-    セリフがアプリの更新で消える。
+    手で直した写しは、ひな形を更新しても上書きしない（上書きすると、直したセリフがアプリの
+    更新で消える）。手を入れていない写し（＝以前の版のひな形と同じ中身）だけ、新しいひな形に
+    置き換える。これをしないと、同梱の台本を直しても、入れてあるアプリには届かない。
     """
     from data_paths import data_root
 
     target = data_root() / "presets" / "easy_train_lines.txt"
-    if not target.is_file() and LINES_FILE.is_file():
+    if LINES_FILE.is_file() and (not target.is_file() or _is_untouched_old_copy(target)):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(LINES_FILE.read_text(encoding="utf-8"), encoding="utf-8")
     return target
+
+
+# 以前の版に同梱していた台本の sha256（改行を LF にそろえた中身）。main.js も同じファイルを読む。
+PAST_LINES_FILE = PRESET_DIR / "easy_train_lines.past.json"
+
+
+def _is_untouched_old_copy(target: Path) -> bool:
+    """写しが、以前の版のひな形と一字一句同じか（＝利用者が手を入れていないか）。"""
+    import hashlib
+
+    try:
+        past = set(json.loads(PAST_LINES_FILE.read_text(encoding="utf-8"))["sha256"])
+        text = target.read_bytes().replace(b"\r\n", b"\n")
+    except (OSError, ValueError, KeyError):
+        return False        # 判断できないときは触らない（手で直したものを消さない側に倒す）
+    return hashlib.sha256(text).hexdigest() in past
 
 # 学習素材にする文の長さ。短い文を入れない理由は2つある。数文字の音声だと
 # Whisper が前後を埋めようとして幻聴を起こし、CER が実態と無関係に悪化する。
@@ -163,6 +180,8 @@ def _jobs_root() -> Path:
 class GenerateRequest(BaseModel):
     ref_wav: str = Field(..., description="①で確定した参照音声の絶対パス")
     model_type: str = Field("v4_1")
+    # 素材に透かしを入れるか。入れない素材（既定）は、学習のあとで消す約束で作る（TrainRequest.delete_materials）。
+    watermark: bool = Field(False, description="素材に電子透かしを入れる（入れた素材は消さずに残す）")
     limit: int | None = Field(None, ge=1, description="試験用。既定は全件")
     dataset: str | None = Field(
         None, description="指定すると生成後にこの名前でデータセットを作る"
@@ -323,9 +342,14 @@ def _resolve_wav(path_or_url: str) -> Path:
 
 
 def _synthesize_one(text: str, ref_wav: str | None, model_type: str,
-                    lora: str | None = None, seed: int | None = None) -> str:
-    """1本合成して、出力 wav の絶対パスを返す。ref_wav が None なら参照なしで読む。"""
+                    lora: str | None = None, seed: int | None = None, watermark: bool = False) -> str:
+    """1本合成して、出力 wav の絶対パスを返す。ref_wav が None なら参照なしで読む。
+
+    watermark が False なら透かしを入れない（学習用の素材と、測ったら消す評価用の音声）。
+    """
     payload: dict = {"text": text, "model_type": model_type, "easy_token": INTERNAL_TOKEN}
+    if watermark:
+        payload["easy_watermark"] = True
     if ref_wav:
         payload["ref_wav"] = ref_wav
     if lora:
@@ -343,8 +367,8 @@ def _synthesize_one(text: str, ref_wav: str | None, model_type: str,
     return str(_resolve_wav(result["results"][0]))
 
 
-# 読み方の指示に使う絵文字（行頭のタグと、文中に差し込んだタグ）。生成のときは
-# 本文と一緒に渡すが、学習データの文には残さない（2026-10-01 決定）。
+# 読み方の指示に使う絵文字（行頭のタグと、文中に差し込んだタグ）。生成のときも学習データの文にも
+# 入れる。読み間違いの判定（書き起こしとの比較）のときだけ外す。
 _STYLE_TAG_RE = re.compile(r"[🀀-🫿☀-♤♦-➿⏩-⏿️‍]")
 
 
@@ -363,8 +387,13 @@ def _run_generate(job_id: str, req: GenerateRequest) -> None:
         _write_status(job_id, status)
 
         for tag, body in rows:
-            path = _synthesize_one(f"{tag} {body}", req.ref_wav, req.model_type)
-            status["clips"].append({"path": path, "text": strip_style_tags(body), "tag": tag})
+            path = _synthesize_one(f"{tag} {body}", req.ref_wav, req.model_type, watermark=req.watermark)
+            # 学習データの文にも、生成のときと同じ絵文字を残す（2026-10-04 に変更）。作者の回答では、
+            # 学習テキストに絵文字が無いと絵文字での制御が弱まり、感情を強くかけたとき声が変わる
+            # （Aratako/Irodori-TTS Issue #8）。plain は絵文字を外した文で、読み間違いを測るときにだけ使う
+            # （書き起こしには絵文字が出ないので、絵文字つきの文と比べると全部が誤りに数えられる）。
+            status["clips"].append({"path": path, "text": f"{tag} {body}",
+                                    "plain": strip_style_tags(body), "tag": tag})
             status["done"] = len(status["clips"])
             _write_status(job_id, status)
 
@@ -437,7 +466,7 @@ def _run_generate(job_id: str, req: GenerateRequest) -> None:
 # LoRA を切り替えられると、共有しているアダプタが差し替わって、素材の
 # 何本かに別の声が混ざる。どちらも音を聞くまで気付けない。
 _ACTIVE_STATES = ("queued", "running", "tuning", "screening", "saving",
-                  "training", "evaluating")
+                  "measuring", "training", "evaluating")
 
 
 # 自分の工程が自分の足を止めないための合言葉。
@@ -622,7 +651,8 @@ def _write_sample_list(name: str, clips: list[dict], kept: list[dict]) -> None:
     for clip in clips:
         p = Path(clip["path"])
         mark = "採用" if clip["path"] in keep else "除外"
-        lines.append(sep.join([p.name, mark, clip.get("tag", ""), clip.get("text", "")]))
+        # text は絵文字つきなので、本文の列には絵文字を外した plain を出す（タグの列と二重にしない）
+        lines.append(sep.join([p.name, mark, clip.get("tag", ""), clip.get("plain", clip.get("text", ""))]))
     text = chr(10).join(lines) + chr(10)
     (samples_dir(name) / "一覧.txt").write_text(text, encoding="utf-8")
 
@@ -631,9 +661,8 @@ def _create_dataset(name: str, clips: list[dict]) -> None:
     """生成した音声をデータセットにする。
 
     テキストは生成に使ったものが分かっているので、分割も書き起こしも通さない。
-    保存するのは本文だけで、感情タグは入れない。タグは「どう読むか」の指示で
-    あって台詞の一部ではなく、学習の書き起こしに混ぜると読み上げ対象として
-    覚えてしまう。
+    保存するのは、生成に使ったのと同じ文（読み方の絵文字つき）。学習の文に絵文字が無いと、
+    絵文字での制御が弱まり、感情を強くかけたとき声が変わる（Aratako/Irodori-TTS Issue #8）。
     """
     body = json.dumps({
         "name": name,
@@ -936,7 +965,7 @@ def peek_folder(req: PeekRequest) -> JSONResponse:
     files = _folder_audio(folder)
     if not files:
         raise HTTPException(400, f"音声が見つかりません: {folder}")
-    # 30秒を超える本の数。画面が入れた時点で知らせる（学習には切って使う）
+    # 30秒を超える本の数。画面が入れた時点で知らせる（学習には、30秒以下に分けて使う）
     from server_audio import CLIP_MAX_SEC
     import soundfile as sf
 
@@ -1068,6 +1097,9 @@ class TrainRequest(BaseModel):
     lora_name: str = Field(..., description="登録する名前")
     ref_wav: str = Field(..., description="①で確定した参照音声。SIM の基準になる")
     base: str = Field("v4_1")
+    # 透かしなしで作った素材を、学習が終わったら消す（素材のフォルダと、そのデータセット）。
+    # 透かしの無い音声を手元に残さないため。フォルダの音声を素材にしたときは付けない。
+    delete_materials: bool = Field(False, description="学習のあと、素材とデータセットを消す")
     max_steps: int | None = Field(None, ge=10, description="省略時は auto_config の推奨")
     # 学習側の下限が 10。ここを緩くすると 422 になるだけなので揃える。
     save_every: int | None = Field(None, ge=10)
@@ -1199,7 +1231,7 @@ def _measure(targets, eval_lines, job_id: str, ref_wav: str, base: str,
              made_wavs: list[str], save, should_stop=None) -> list[dict]:
     """チェックポイントを1つずつ鳴らして SIM と CER を測る。"""
     from easy_eval import (
-        SIM_MIN_CHARS, eval_seed, release_eval_models, release_runtime, score_lines,
+        eval_seed, release_eval_models, release_runtime, score_lines,
         speaker_similarity, transcribe,
     )
 
@@ -1235,7 +1267,7 @@ def _measure(targets, eval_lines, job_id: str, ref_wav: str, base: str,
         results = []
         try:
             for wav, tag, body in wavs:
-                sim = speaker_similarity(ref_wav, wav) if len(body) >= SIM_MIN_CHARS else None
+                sim = speaker_similarity(ref_wav, wav)
                 results.append({"tag": tag, "body": body, "heard": transcribe(wav), "sim": sim})
         finally:
             # 次のチェックポイントを鳴らす前に返す。抱えたままだと合成と
@@ -1258,8 +1290,8 @@ def _step_of(checkpoint_name: str, max_steps: int) -> int | None:
     """チェックポイント名から学習ステップ数を読む。
 
     最終チェックポイントは checkpoint_final という名前で数字を持たない。
-    0 と見なすと「60%以降」の判定から漏れて、一番学習が進んだものを
-    評価対象から外してしまう。総ステップ数として扱う。
+    0 と見なすと、一番学習が進んだものが一番手前として扱われ、点数が近いときに
+    「学習が進んだほうを選ぶ」の対象から外れる。総ステップ数として扱う。
     """
     if checkpoint_name.endswith("final"):
         return max_steps
@@ -1267,21 +1299,42 @@ def _step_of(checkpoint_name: str, max_steps: int) -> int | None:
     return int(m.group(1)) if m else None
 
 
+def _delete_materials(dataset: str) -> bool:
+    """透かしなしで作った素材を消す。素材のフォルダ（easy_samples）と、それを写したデータセットの両方。
+
+    登録した LoRA は残る。消すのは学習が最後まで終わったあとだけ（途中で失敗したときは、やり直せるよう残す）。
+    """
+    shutil.rmtree(samples_dir(dataset), ignore_errors=True)
+    try:
+        _http("DELETE", f"/datasets/{_q(dataset)}")
+    except Exception:  # noqa: BLE001 - 消せなかったら、消せなかったと画面に出す
+        return False
+    return not samples_dir(dataset).exists()
+
+
 def _run_train(easy_id: str, req: TrainRequest) -> None:
     from easy_eval import pick_by_score
 
     status = _read_status(easy_id) or {}
     try:
-        # 学習タブと同じ決め方にする。compile_blocks を付けて聞くと、v4-Large で
-        # compile が使えるときは 8本×4回・参照 30 秒の組が返る。ここだけ 4本×8回・
-        # 参照 120 秒・compile なしで走らせると 1 ステップ約 5.7 秒（学習タブは約 1.8 秒）。
-        q = urllib.parse.urlencode({"base": req.base, "compile_blocks": "true"})
+        # 学習タブの「おまかせ設定」と同じ決め方にする。ステップ数と学習範囲は素材から、
+        # バッチはこの PC・この素材での試し走りで測る。「学習を速くする」は使える環境なら入れる。
+        # （以前は VRAM の総量の表で決め、v4-Large・15GB 以上のときしか速い設定にならなかった）
+        q = urllib.parse.urlencode({"base": req.base})
         cfg = _http("GET", f"/datasets/{_q(req.dataset)}/auto_config?{q}")
         rec = cfg.get("recommended", {})
         max_steps = req.max_steps or int(rec.get("max_steps") or 600)
         save_every = req.save_every or int(rec.get("save_every") or 100)
-        batch_size = int(rec["batch_size"])
-        accum = int(rec["gradient_accumulation_steps"])
+        preset = rec.get("preset") or "speaker_style"
+        status.update(state="measuring")
+        _write_status(easy_id, status)
+        defaults = _http("GET", f"/lora/train_defaults?{q}")
+        measured = _http("POST", "/lora/measure_batch", {
+            "easy_token": INTERNAL_TOKEN, "dataset": req.dataset, "base": req.base, "preset": preset,
+            "compile_blocks": bool(defaults.get("compile_available")),
+        }, timeout=3600)
+        batch_size = int(measured["batch_size"])
+        accum = int(measured["gradient_accumulation_steps"])
         status["batch_size"] = batch_size
 
         status.update(state="training", train_total=max_steps)
@@ -1292,16 +1345,17 @@ def _run_train(easy_id: str, req: TrainRequest) -> None:
             "lora_name": req.lora_name,
             "dataset": req.dataset,
             "base": req.base,
-            "preset": rec.get("preset") or "speaker_style",
+            "preset": preset,
             "max_steps": max_steps,
             "save_every": save_every,
             "batch_size": batch_size,
             "gradient_accumulation_steps": accum,
+            # 測ったときと同じ条件で学習する
+            "compile_blocks": bool(measured["compile_blocks"]),
+            "gradient_checkpointing": bool(measured["gradient_checkpointing"]),
         }
-        if rec.get("ref_max_seconds") is not None:
-            # 参照を 30 秒に絞るのは、8本ずつ compile する組のとき（16GB に収めるため）
-            job_body["compile_blocks"] = True
-            job_body["ref_max_seconds"] = float(rec["ref_max_seconds"])
+        if measured.get("ref_max_seconds") is not None:
+            job_body["ref_max_seconds"] = float(measured["ref_max_seconds"])
         job = _http("POST", "/lora/jobs", job_body)
         train_id = job["job_id"]
         status["train_job"] = train_id
@@ -1331,6 +1385,8 @@ def _run_train(easy_id: str, req: TrainRequest) -> None:
         _http("POST", f"/lora/jobs/{train_id}/register",
               {"checkpoint": picked["name"], "lora_name": req.lora_name})
         status["picked"] = picked
+        if req.delete_materials:
+            status["materials_deleted"] = _delete_materials(req.dataset)
         status["state"] = "done"
     except Exception as exc:  # noqa: BLE001
         import traceback

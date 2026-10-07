@@ -392,11 +392,22 @@ ipcMain.handle('open-save-folder', async (event, folder) => {
 
 // 編集して使うセリフファイル。サーバーの user_lines_file() と同じ場所を指す。
 // 同梱のひな形は配布版だとアプリの中にあって書けないので、data の下へ写す。
-// 写すのは一度だけ（手で直したものを、アプリ更新で消さない）。
+// 手で直した写しは、アプリ更新で消さない。手を入れていない写し（以前の版のひな形と同じ中身）だけ、
+// 新しいひな形に置き換える（サーバーの user_lines_file() と同じ決まり）。
+function isUntouchedOldLinesCopy(file) {
+  try {
+    const past = JSON.parse(fs.readFileSync(path.join(__dirname, 'presets', 'easy_train_lines.past.json'), 'utf8')).sha256;
+    const text = fs.readFileSync(file, 'utf8').replace(/\r\n/g, '\n');
+    return past.includes(require('crypto').createHash('sha256').update(text, 'utf8').digest('hex'));
+  } catch (_) {
+    return false;   // 判断できないときは触らない（手で直したものを消さない側に倒す）
+  }
+}
+
 function getEasyLinesPath() {
   const dir = path.join(getDataRoot(), 'presets');
   const file = path.join(dir, 'easy_train_lines.txt');
-  if (!fs.existsSync(file)) {
+  if (!fs.existsSync(file) || isUntouchedOldLinesCopy(file)) {
     fs.mkdirSync(dir, { recursive: true });
     fs.copyFileSync(path.join(__dirname, 'presets', 'easy_train_lines.txt'), file);
   }

@@ -47,7 +47,7 @@ function applyDict(text) {
 // v3 以前の 41 個の表には入っていないので、v3 に付けても学習されておらず
 // 効かない（UI に注記を出す）。
 //
-// 位置は公式サンプルに倣って対象の文の先頭に置く。上流に「文頭に置く」と
+// 位置は公式サンプルに倣って対象の文の先頭に置く。公式に「文頭に置く」と
 // 明記した規約は無いが、モデルカードの例はいずれも効かせたい箇所の直前に
 // 差し込む形で、文全体を囲む例は無い。
 // キャプション（声の説明文）で条件づけるモデル。参照音声ではなく文章で
@@ -691,6 +691,7 @@ async function init() {
   setupSynthSaveFolder();
   setupMetaImport();
   setupSettings();
+  setupThemedTooltips();
   refreshModelAvailability();
   // 学習は Train タブを離れても続く。生成側でも状態を持っておく。
   pollTrainingBusy();
@@ -974,6 +975,9 @@ async function checkApiStatus() {
       if (!_serverWasOnline) {
         _serverWasOnline = true;
         loadVoices();
+        // 起動直後の読み込みは、サーバーがまだ立ち上がっていなくて失敗する。繋がった時点で読み直して、
+        // 取得していないモデルに「（未取得）」を付ける（設定を開くまで付かなかった）。
+        refreshModelAvailability();
         // 状態カードの LoRA 件数は loraRegistry を見る。待たずに進むと
         // 初回だけ「0 個」と出て、次のポーリングまで直らない。
         await loadLoras();
@@ -1403,11 +1407,46 @@ async function modelAction(act, id) {
   loadModelCatalog();
 }
 
+// title 属性の説明は、OS の見た目（灰色の箱）で出て、画面の色と合わない。同じ文を、アプリの色の箱で出す。
+// マウスが乗った時点で title を data-title へ移し、OS のツールチップが出ないようにする
+// （あとからコードが title を入れ直した欄も、次に乗ったときに拾う）。
+function setupThemedTooltips() {
+  const box = document.createElement('div');
+  box.className = 'app-tip';
+  document.body.appendChild(box);
+  let current = null;
+  const hide = () => { box.classList.remove('show'); current = null; };
+  document.addEventListener('mouseover', (e) => {
+    const el = e.target.closest ? e.target.closest('[title], [data-title]') : null;
+    if (!el) { hide(); return; }
+    if (el.hasAttribute('title')) {
+      if (el.title) el.dataset.title = el.title; else delete el.dataset.title;
+      el.removeAttribute('title');
+    }
+    if (!el.dataset.title) { hide(); return; }
+    if (el === current) return;
+    current = el;
+    box.textContent = el.dataset.title;
+    const r = el.getBoundingClientRect();
+    const left = Math.min(Math.max(8, r.left), window.innerWidth - box.offsetWidth - 8);
+    let top = r.bottom + 6;
+    if (top + box.offsetHeight > window.innerHeight - 8) top = Math.max(8, r.top - box.offsetHeight - 6);
+    box.style.left = `${left}px`;
+    box.style.top = `${top}px`;
+    box.classList.add('show');
+  });
+  document.addEventListener('mouseout', (e) => {
+    if (current && !current.contains(e.relatedTarget)) hide();
+  });
+  document.addEventListener('scroll', hide, true);
+  document.addEventListener('mousedown', hide);
+}
+
 // 取得していないモデルは、選べる一覧で「（未取得）」にして選べなくする。
 // 生成・学習・かんたん学習の VoiceDesign の3か所。
 function applyModelAvailability(models) {
   const have = new Map(models.map(m => [m.id, m.downloaded]));
-  for (const sel of ['model-type', 'tr-base', 'easy-vd-model']) {
+  for (const sel of ['model-type', 'tr-base', 'easy-vd-model', 'easy-gen-model', 'easy-train-base']) {
     const el = document.getElementById(sel);
     if (!el) continue;
     for (const opt of el.options) {
@@ -1425,7 +1464,7 @@ async function refreshModelAvailability() {
     const res = await fetch(`${API_URL}/models/catalog`);
     if (res.ok) applyModelAvailability((await res.json()).models);
   } catch (err) {
-    console.error('モデルの取得状況を読めませんでした', err);
+    reportFetchFailure('モデルの取得状況を読めませんでした', err);
   }
 }
 
@@ -2011,12 +2050,16 @@ function applyTrainingLock() {
   if (trainingBusy) {
     generateBtn.disabled = true;
     generateBtn.title = 'LoRA 学習中は生成できません';
+    generateBtn.dataset.busyByTraining = '1';
   } else {
     // 生成中の disabled は generateAudio 側が管理するので、そちらが
-    // 触っていないときだけ戻す。
-    if (generateBtn.title === 'LoRA 学習中は生成できません') {
+    // 触っていないときだけ戻す。学習で止めたかどうかは印で持つ（title は、マウスが乗ると
+    // ツールチップ用に data-title へ移るので、title の文では見分けられない）。
+    if (generateBtn.dataset.busyByTraining) {
       generateBtn.disabled = false;
       generateBtn.title = '';
+      delete generateBtn.dataset.title;
+      delete generateBtn.dataset.busyByTraining;
     }
   }
 }
@@ -2457,10 +2500,11 @@ async function probeSources(recommend) {
 // 音源ごとの長さ（秒）。分割中の表示に使う
 let dsSourceDurations = {};
 
-// 元のモデルは30秒までしか扱わない（server_audio.CLIP_MAX_SEC）。
-// 超える音源は切って使うが、文の途中で切れることがあるので入れた時点で知らせる
+// 学習は 1 本を 30 秒までしか使わない（server_audio.CLIP_MAX_SEC）。ここで入れた音源は、超える分を
+// 30 秒以下に分けて全部使う。捨てはしないので、その動きをそのまま知らせる。
+// （分けないまま学習に入る場合の警告は、学習タブの updateTrainLongNote が出す）
 const LONG_SOURCE_SEC = 30;
-const LONG_SOURCE_NOTE = '30秒を超えるファイルがあります。30秒以上の音声は完全に学習されず、精度に影響します。';
+const LONG_SOURCE_NOTE = '30秒を超えるファイルがあります。30秒を超えるファイルは、30秒以下に分けて使います。';
 
 function showLongNote(id, hasLong) {
   const el = document.getElementById(id);
@@ -2507,13 +2551,9 @@ async function recommendDsOptions() {
       if (!res.ok) throw new Error(`status ${res.status}`);
       rec = await res.json();
     }
-    applyDsOptions({
-      ...DS_RECOMMENDED,
-      vocab: document.getElementById('ds-vocab').value,
-      splitMethod,
-      minSec,
-      asrModel: rec.asr_model,
-    });
+    // 測って決めた欄だけを書き換える。決める根拠の無い欄（最長、区切る間、dB の基準など）には触らない
+    // （手で変えた値を、既定値で上書きしない）。
+    applyDsOptions({ splitMethod, minSec, asrModel: rec.asr_model, trim: DS_RECOMMENDED.trim });
     saveDsOptions();
     // 変わった項目が見えるように、畳んである詳細設定を開く
     document.getElementById('ds-more').open = true;
@@ -2629,7 +2669,7 @@ function renderSources() {
 
 async function processSources() {
   if (dsSourceFiles.length === 0) {
-    alert('Add at least one audio file first.');
+    alert('先に音源を 1 つ以上入れてください。');
     return;
   }
   const o = readDsOptions();
@@ -2749,7 +2789,7 @@ async function processSources() {
       (models.length > 1 ? `（2 つのモデルが食い違った行 ${diffs}）` : '');
     dsSaveBtn().disabled = dsCurrentClips.length === 0;
   } catch (err) {
-    status.textContent = `Error: ${err.message}`;
+    status.textContent = `失敗しました：${err.message}`;
   } finally {
     dsProcessBtn().disabled = false;
   }
@@ -3233,6 +3273,23 @@ async function loadTrainDefaults() {
   compile.disabled = !d.compile_available;
   note.textContent = d.compile_available ? '' : 'この環境では使えません（NVIDIA の GPU と Triton が必要です）。';
   note.classList.toggle('hidden', !!d.compile_available);
+  // 読み取り結果を使い回す学習（v4 以降）ではメモリとディスクの注意書きを、v3 以前では働かない旨を出す
+  trCacheInfo = { supported: !!d.cache_condition_states, skippedPresets: d.cache_skipped_presets || [] };
+  updateTrainMemoryNote();
+}
+
+// 使い回しが実際に働くかは、ベースモデルと学習範囲の両方で決まる。働かないのに「使い回します」と出さない。
+let trCacheInfo = { supported: false, skippedPresets: [] };
+function updateTrainMemoryNote() {
+  const memNote = document.getElementById('tr-memory-note');
+  if (!trCacheInfo.supported) {
+    memNote.textContent = 'v3 以前のモデルでは、文章の読み取り結果の使い回しは働きません（効果が小さいため）。';
+  } else if (trCacheInfo.skippedPresets.includes(trPreset().value)) {
+    memNote.textContent = '学習範囲が「全体」のときは、文章の読み取り部分も学習するので、読み取り結果の使い回しは働きません。';
+  } else {
+    memNote.textContent = '文章の読み取り結果を使い回して、学習を速くします。本体メモリを最大 8GB ほど使います。本体メモリが足りないときは、学習中だけディスクに一時ファイルを置きます（データセットが大きいほど容量を使います。学習が終わると消します）。';
+  }
+  memNote.classList.remove('hidden');
 }
 const trStartBtn = () => document.getElementById('tr-start-btn');
 const trStopBtn = () => document.getElementById('tr-stop-btn');
@@ -3258,6 +3315,16 @@ const trRefreshJobs = () => document.getElementById('tr-refresh-jobs');
 let trActiveJobId = null;
 let trPollHandle = null;
 
+// 学習は 1 本を 30 秒までしか使わない（公式の設定 max_latent_steps）。データセットタブで作ったものは 30 秒以下に
+// 分けてあるが、取り込んだものや古いものには 30 秒を超えるクリップが残っていることがある。
+function updateTrainLongNote() {
+  const opt = trDataset().selectedOptions[0];
+  const n = opt ? Number(opt.dataset.longClips || 0) : 0;
+  const el = document.getElementById('tr-long-note');
+  el.textContent = n > 0 ? `30秒を超えるクリップが ${n} 本あります。30秒を超えた音声は学習に使用されません。` : '';
+  el.classList.toggle('hidden', n === 0);
+}
+
 async function refreshTrainDatasetOptions() {
   try {
     const res = await fetch(`${API_URL}/datasets`);
@@ -3275,10 +3342,12 @@ async function refreshTrainDatasetOptions() {
         const opt = document.createElement('option');
         opt.value = d.name;
         opt.textContent = `${d.name} (${d.num_clips} clips)`;
+        opt.dataset.longClips = d.long_clips || 0;
         sel.appendChild(opt);
       });
     }
     updateStartBtnState();
+    updateTrainLongNote();
   } catch (err) {
     reportFetchFailure('[train] データセットを読めませんでした:', err);
   }
@@ -3500,6 +3569,14 @@ function renderActiveJob(job) {
   if (etaEl && job.state === 'evaluating') {
     const ev = job.evaluation || {};
     etaEl.textContent = `各ステップを測っています ${(ev.rows || []).length} / ${ev.total || '?'}`;
+  }
+
+  // 失敗したときは、止まった理由と次にすることを出す（サーバが文を作る）
+  const errEl = document.getElementById('tr-job-error');
+  if (errEl) {
+    const failed = job.state === 'failed' && !!job.error;
+    errEl.textContent = failed ? job.error : '';
+    errEl.classList.toggle('hidden', !failed);
   }
 
   // 損失は増減も添える。下がっているかが一目で分かればよい。
@@ -3966,6 +4043,25 @@ async function trRegisterCheckpoint() {
 // 開始まで続けていたころは、画面に残った値と実際に走る値が食い違い
 // （50 と入れたのに 350 で走る）、何で回っているのか分からなくなっていた。
 // 走るのは常に画面に見えている値、という一点を崩さない。
+// 試し走り（バッチサイズを測る）の進み具合を、待っている間に出す。止める関数を返す。
+// 「学習を速くする」がオンだと、試し走りのたびにコンパイルが入るので長くなる。先に目安を言う。
+function watchMeasureProgress(say, compileOn) {
+  const about = compileOn
+    ? '「学習を速くする」がオンなので、コンパイルが入ります。10分ほどかかることがあります'
+    : '数分かかります';
+  const fmt = (sec) => `${Math.floor(sec / 60)}分${String(sec % 60).padStart(2, '0')}秒`;
+  say(`測っています…（この PC に合うバッチサイズを、試し走りで測ります。${about}）`);
+  const timer = setInterval(async () => {
+    try {
+      const s = await (await fetch(`${API_URL}/lora/measure_batch/status`)).json();
+      if (!s.active) return;
+      const what = s.run ? `試し走り ${s.run}回目（バッチ ${s.batch}）: ${s.phase}` : s.phase;
+      say(`測っています… ${what}（経過 ${fmt(s.elapsed || 0)}。${about}）`);
+    } catch (_) { /* 進み具合が読めなくても、測定そのものは続く */ }
+  }, 2000);
+  return () => clearInterval(timer);
+}
+
 async function applyAutoSetting() {
   const dataset = trDataset().value;
   if (!dataset) {
@@ -3973,7 +4069,10 @@ async function applyAutoSetting() {
     updateStartBtnState();
     return;
   }
-  trStartStatus().textContent = `Analyzing dataset "${dataset}"…`;
+  const autoBtn = document.getElementById('tr-auto-setting-btn');
+  autoBtn.disabled = true;
+  let stopMeasureWatch = () => {};
+  trStartStatus().textContent = '素材を調べています…';
   try {
     const q = new URLSearchParams({ base: trBase().value, compile_blocks: document.getElementById('tr-compile').checked });
     const res = await fetch(`${API_URL}/datasets/${encodeURIComponent(dataset)}/auto_config?${q}`);
@@ -3984,13 +4083,9 @@ async function applyAutoSetting() {
     const r = json.recommended || {};
     if (r.max_steps != null) trMaxSteps().value = r.max_steps;
     if (r.save_every != null) trSaveEvery().value = r.save_every;
-    if (r.batch_size != null) trBatchSize().value = r.batch_size;
-    if (r.gradient_accumulation_steps != null) trGradAccum().value = r.gradient_accumulation_steps;
-    // 残りの設定はベースモデルの既定に戻す（データ量で変える根拠がまだ無い）
-    await loadTrainDefaults();
-    if (r.ref_max_seconds != null) document.getElementById('tr-ref-max').value = r.ref_max_seconds;
     if (r.preset) {
       trPreset().value = r.preset;
+      updateTrainMemoryNote();
       // <select> に無い値を入れると .value は黙って空文字になり、
       // そのまま送信されて 400 で落ちる。ここで止めて理由を出す。
       if (trPreset().value !== r.preset) {
@@ -3998,12 +4093,32 @@ async function applyAutoSetting() {
           Array.from(trPreset().options).map(o => o.value).join(', ') + ')');
       }
     }
-    trStartStatus().textContent =
-      `推奨値を入れました: ${r.preset} / max_steps=${r.max_steps} / save_every=${r.save_every} ` +
-      `(${json.num_clips} clips, avg ${json.avg_duration}s, total ${formatDuration(json.total_duration)})。` +
-      `内容を確認して Start Training を押してください。`;
+    // バッチは、この PC・この素材で数ステップ動かして測る（表で決めない）。
+    // 学習率やランクなど、決める根拠がまだ無い欄には触らない（手で変えた値を消さない）。
+    const compileBox = document.getElementById('tr-compile');
+    if (!compileBox.disabled) compileBox.checked = true;
+    stopMeasureWatch = watchMeasureProgress((text) => { trStartStatus().textContent = text; }, compileBox.checked);
+    trStartStatus().classList.add('busy');
+    const mres = await fetch(`${API_URL}/lora/measure_batch`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      // 「学習を速くする」は、使える環境ならおまかせがオンにする。オフにはしない（使えない環境では押せないまま）。
+      // そのうえで、チェックの状態に合わせて測る（コンパイルすると使う VRAM が変わるため、本番と同じ条件にする）
+      body: JSON.stringify({ dataset, base: trBase().value, preset: trPreset().value,
+                             compile_blocks: document.getElementById('tr-compile').checked }),
+    });
+    const m = await mres.json();
+    if (!mres.ok) throw new Error(m.detail || m.error || `status ${mres.status}`);
+    trBatchSize().value = m.batch_size;
+    trGradAccum().value = m.gradient_accumulation_steps;
+    if (m.ref_max_seconds != null) document.getElementById('tr-ref-max').value = m.ref_max_seconds;
+    document.getElementById('tr-grad-ckpt').checked = !!m.gradient_checkpointing;
+    trStartStatus().textContent = 'おすすめの値を入力しました。';
   } catch (err) {
-    trStartStatus().textContent = `Auto config failed: ${err.message}`;
+    trStartStatus().textContent = `測れませんでした：${err.message}`;
+  } finally {
+    stopMeasureWatch();
+    trStartStatus().classList.remove('busy');
+    autoBtn.disabled = false;
   }
 }
 
@@ -4039,12 +4154,14 @@ function setupTrainTab() {
     if (autoBtn) autoBtn.addEventListener('click', applyAutoSetting);
     // Keep Start/Auto enabled state in sync with required fields.
     trDataset().addEventListener('change', updateStartBtnState);
+    trDataset().addEventListener('change', updateTrainLongNote);
     // 設定欄にはベースモデルの実際の値を入れて見せる。ベースを替えたら入れ直す。
     // 起動直後はサーバーがまだ上がっていないことがあるので、タブを開いたときにも入れる。
     const fillDefaults = () => loadTrainDefaults().catch(err => {
       trStartStatus().textContent = `設定の既定値を読めませんでした: ${err.message}`;
     });
     trBase().addEventListener('change', fillDefaults);
+    trPreset().addEventListener('change', updateTrainMemoryNote);
     let defaultsFilled = false;
     document.querySelector('.tab-btn[data-tab="train"]')?.addEventListener('click', () => {
       if (!defaultsFilled) { defaultsFilled = true; fillDefaults(); }
@@ -5538,7 +5655,7 @@ function easyLockTabs(locked) {
 function easyLockInputs(locked) {
   const ids = [
     'easy-pick-file', 'easy-pick-folder', 'easy-tune-reset',
-    'easy-lora-name', 'easy-caption', 'easy-sample-text', 'easy-vd-model',
+    'easy-lora-name', 'easy-caption', 'easy-sample-text', 'easy-vd-model', 'easy-gen-model', 'easy-train-base', 'easy-no-wm',
   ];
   for (const [slider] of EASY_TUNE) ids.push(slider);
   for (const id of ids) {
@@ -5637,6 +5754,8 @@ async function easyRunAll() {
   const fromFolder = easySource() === 'folder';
   const srcFolder = easyFolder;
   const srcRef = easyRefWav;
+  // 透かしなしで作った素材は、学習が終わったら消す。フォルダの音声は利用者のものなので消さない。
+  const noWatermark = !fromFolder && easyEl('easy-no-wm').checked;
   try {
     // 2. 素材を用意する。フォルダなら生成せず、中の音声をそのまま使う。
     easySay(2, 'はじめています…');
@@ -5645,7 +5764,7 @@ async function easyRunAll() {
           folder: srcFolder, dataset, ...easyTuneValues(),
         })
       : await easyPost('/easy/generate', {
-          ref_wav: srcRef, model_type: 'v4_1', dataset,
+          ref_wav: srcRef, model_type: easyEl('easy-gen-model').value, dataset, watermark: !noWatermark,
         });
     await easyWatch(gen.job_id, (s) => {
       if (s.state === 'tuning') {
@@ -5679,9 +5798,8 @@ async function easyRunAll() {
       const fin = await easyGet(`/easy/jobs/${gen.job_id}`);
       const r = fin.screen;
       easySay(2, r
-        ? (r.gave_up
-            ? `${r.total} 本すべて使います`
-            : `${r.kept} / ${r.total} 本を使います（${r.total - r.kept} 本は除外）`)
+        ? `${r.kept} / ${r.total} 本を使います（${r.total - r.kept} 本は除外）`
+          + (r.topped_up ? `。基準を通ったのは ${r.kept - r.topped_up} 本で、7割に足りないため、点数の高い順に ${r.topped_up} 本を足しました` : '')
         : '終わりました');
     }
 
@@ -5695,11 +5813,17 @@ async function easyRunAll() {
     // 別のチェックポイントを選ぶ。生成のときは①で決めた声が基準。
     const clip0 = fin2.clips && fin2.clips[0] && fin2.clips[0].path;
     const refForEval = fromFolder ? (clip0 || srcRef) : (srcRef || clip0);
+    let easyMeasureWatch = null;
     const job = await easyPost('/easy/train', {
-      dataset, lora_name: name, ref_wav: refForEval,
+      dataset, lora_name: name, ref_wav: refForEval, base: easyEl('easy-train-base').value,
+      delete_materials: noWatermark,
     });
     await easyWatch(job.job_id, (s) => {
-      if (s.state === 'training' && s.train_total) {
+      if (s.state === 'measuring') {
+        // 学習タブのおまかせ設定と同じ。この PC に合うバッチサイズを、試し走りで測っている段
+        if (!easyMeasureWatch) easyMeasureWatch = watchMeasureProgress((text) => easySay(3, text), true);
+      } else if (s.state === 'training' && s.train_total) {
+        if (easyMeasureWatch) { easyMeasureWatch(); easyMeasureWatch = null; }
         easyBar('easy-train-bar', (s.train_step / s.train_total) * 100);
         easySay(3, `${s.train_step} / ${s.train_total} ステップ`);
       } else if (s.state === 'evaluating') {
@@ -5711,6 +5835,7 @@ async function easyRunAll() {
       }
     });
 
+    if (easyMeasureWatch) { easyMeasureWatch(); easyMeasureWatch = null; }   // 測定中に失敗したときも、表示の更新を止める
     const fin = await easyGet(`/easy/jobs/${job.job_id}`);
     const p = fin.picked || {};
     easyBar('easy-eval-bar', 100);
@@ -5720,7 +5845,9 @@ async function easyRunAll() {
     box.textContent =
       `できました: ${name} / 似ている度 ${(p.sim ?? 0).toFixed(3)} / ` +
       `読み間違い ${((p.cer ?? 0) * 100).toFixed(1)}%` +
-      (p.fallback ? '（どれも基準に届かず、最後のものを使いました）' : '');
+      (noWatermark ? (fin.materials_deleted
+        ? ' / 透かしなしの素材とデータセットは消しました'
+        : ' / ⚠ 透かしなしの素材を消せませんでした。data の easy_samples と、データセットタブから手で消してください') : '');
     easySay(1, `できました。生成タブの LoRA 一覧に「${name}」が出ています`);
     if (typeof loadLoras === 'function') loadLoras();
   } catch (e) {
@@ -5778,6 +5905,14 @@ function initEasyTab() {
   easyEl('easy-tune-reset').addEventListener('click', easyResetTune);
   easySyncTuneLabels();
   easyEl('easy-start').addEventListener('click', easyRunAll);
+  // 透かしなしの素材は学習のあとで消す。消えることを、始める前に必ず見える場所に出す。
+  const syncWmNote = () => {
+    easyEl('easy-wm-note').textContent = easyEl('easy-no-wm').checked
+      ? '⚠ 透かしを入れない素材は、学習終了時に自動で削除されます（作った音声とデータセット、LoRAは残ります）。'
+      : '素材に電子透かしを入れて作り、学習のあとも残します。透かし入りの音声で学習するので、できた LoRA で生成した音声は、透かしが二重になります。';
+  };
+  easyEl('easy-no-wm').addEventListener('change', syncWmNote);
+  syncWmNote();
   easyEl('easy-reload-lines').addEventListener('click', easyLoadLines);
   easyEl('easy-open-lines').addEventListener('click', async () => {
     try {

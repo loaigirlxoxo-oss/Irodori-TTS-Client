@@ -475,7 +475,10 @@ def split_audio(req: SplitRequest) -> JSONResponse:
     else:
         segments = [(0.0, duration)]
     # "none" keeps a file whole and VAD padding can overshoot: last guard.
-    segments = _cap_segments(segments, audio_out, out_sr, CLIP_MAX_SEC, req.max_sec, req.level_floor_db)
+    # 「分割しない」は 1 ファイル＝1 クリップなので、切るのは学習が扱える 30 秒を超えたぶんだけにする。
+    # 「最長」（既定 20 秒）で刻むと、31 秒の台詞が 10〜20 秒で切れてしまう。その欄は「分割しない」の間は触れない。
+    piece_max = req.max_sec if req.method in ("vad", "level") else CLIP_MAX_SEC
+    segments = _cap_segments(segments, audio_out, out_sr, CLIP_MAX_SEC, piece_max, req.level_floor_db)
 
     if not segments:
         return JSONResponse(content={"chunks": [], "source": str(src)})

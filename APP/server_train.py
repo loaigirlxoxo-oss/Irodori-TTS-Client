@@ -114,6 +114,10 @@ PRESETS: dict[str, str] = {
     "style_only": "diffusion_attn_mlp",
 }
 
+# 文章の読み取り部分まで学習する学習範囲。このときは読み取り結果を使い回せない
+# （結果を固定すると、その部分が何も学ばない。train.py が実行時に判定して使い回しをやめる）。
+READER_TRAINING_PRESETS = ("full",)
+
 CODEC_REPO = "Aratako/Semantic-DACVAE-Japanese-32dim"
 
 
@@ -127,6 +131,33 @@ _STEP_RE = re.compile(r"^step=(\d+)\s+loss=([\d.eE+\-]+)")
 # 学習の行と同じ形をしている。行頭で区別しないと、検証が走るたびに
 # current_loss が val_loss で上書きされ、UI に学習ロスとして検証ロスが出る。
 _VALID_STEP_RE = re.compile(r"^valid(?:\s+final)?\s+step=(\d+)\s+loss=([\d.eE+\-]+)")
+_OOM_RE = re.compile(r"out of memory", re.IGNORECASE)
+_VRAM_CAP_RE = re.compile(r"^VRAM cap: ([\d.]+) GB")
+_ERROR_LINE_RE = re.compile(r"^[A-Za-z_.]*(?:Error|Exception)\b.*")
+
+
+def failure_message(returncode: int, log_lines: list[str], params: dict) -> str:
+    """学習が止まったときの、利用者向けの文。何が原因で、次に何をすればよいかを書く。"""
+    lines = [line.strip() for line in log_lines]
+    if any(_OOM_RE.search(line) for line in lines):
+        cap = next((m.group(1) for line in lines if (m := _VRAM_CAP_RE.match(line))), None)
+        batch = int(params["batch_size"])
+        accum = int(params["gradient_accumulation_steps"])
+        tips = []
+        if batch > 1:
+            tips.append(f"バッチサイズを {batch} から {batch // 2} に減らし、"
+                        f"勾配の蓄積を {accum} から {accum * 2} に増やす")
+        ref = params.get("ref_max_seconds")
+        tips.append("参照音声の上限を短くする" + (f"（いま {float(ref):g}秒）" if ref else ""))
+        if params.get("gradient_checkpointing") is False:
+            tips.append("勾配チェックポイントを入れる")
+        tips.append("ほかのアプリを閉じて、VRAM を空ける")
+        head = "VRAM が足りず、学習を止めました" + (f"（使えた量: {cap}GB）" if cap else "")
+        return head + "。次のどれかを試してください。\n" + "\n".join("・" + t for t in tips)
+    cause = next((line for line in reversed(lines) if _ERROR_LINE_RE.match(line)), "")
+    tail = f"\n原因: {cause[:300]}" if cause else "\n下の「記録」の末尾に、止まる直前の出力があります。"
+    return f"学習が途中で止まりました（終了コード {returncode}）。" + tail
+
 
 # Single active job lock (MVP: serial execution).
 _active_lock = threading.Lock()
@@ -743,6 +774,8 @@ def _build_train_command(
         # 一覧に出したいので、save 頻度に合わせて必ず走らせる。
         "--valid-every", str(int(save_every)),
         "--valid-ratio", f"{_valid_ratio_for(num_clips, valid_clips):.6f}",
+        # 検証の本を学習から外さない。検証の損失は画面に出すだけで、ステップ選びには使わない。
+        "--valid-from-train",
         "--batch-size", str(int(batch_size)),
         "--gradient-accumulation-steps", str(int(gradient_accumulation_steps)),
         "--save-every", str(int(save_every)),
@@ -1045,6 +1078,9 @@ def _run_job(job_id: str, params: dict) -> None:
                 # UI の数値が跳ねて「悪化した」ように見える。
                 _update_status(job_id, valid_loss=float(v.group(2)))
         proc.wait()
+        # 読み取り結果をディスクに置いた学習の一時ファイル。train.py は終わるときに自分で消すが、
+        # 停止ボタンで止めたときは消す間が無いので、ここでも消す。
+        shutil.rmtree(train_output / "_condition_cache", ignore_errors=True)
 
         # Detect stopped (terminated externally) vs error vs success.
         # A killed process also exits non-zero, so ask whether a stop was
@@ -1060,7 +1096,7 @@ def _run_job(job_id: str, params: dict) -> None:
                 job_id,
                 state="failed",
                 finished_at=_now_iso(),
-                error=f"train.py exited {proc.returncode}",
+                error=failure_message(proc.returncode, log_lines, params),
             )
             log(f"[job] FAILED (exit {proc.returncode})")
             return
@@ -1155,7 +1191,7 @@ def _evaluate_job(job_id: str, params: dict) -> None:
         for r in rows:
             r["score"] = combined_score(r)
         picked = pick_by_score(rows)
-        result.update(picked=picked["name"], fallback=picked["fallback"])
+        result.update(picked=picked["name"])
     _update_status(job_id, evaluation=result)
 
 
@@ -1275,7 +1311,205 @@ def train_defaults(base: str) -> JSONResponse:
         "compile_blocks": base == "v4_large" and compile_available(),
         "compile_available": compile_available(),
         "ref_max_seconds": t.get("ref_max_seconds"),
+        # 読み取り結果の使い回しをする学習か（本体メモリ・ディスクを使う旨の注意書きを出すため）
+        "cache_condition_states": bool(t.get("lora_cache_condition_states", False)),
+        "cache_skipped_presets": list(READER_TRAINING_PRESETS),
     })
+
+
+# ===== おまかせ設定のための試し走り（Client 独自） =====
+#
+# バッチサイズを VRAM の総量の表で決めると、ほかのアプリが VRAM を使っているとき・素材が長いとき・
+# 測っていない GPU のときに外れる。学習と同じ条件で数ステップだけ実際に動かし、使った量を測って決める。
+_PROBE_CANDIDATES = (8, 4, 2, 1)
+_PROBE_EFFECTIVE_BATCH = 32          # バッチ×勾配の蓄積。学習の中身を変えないよう、これは固定する
+_PROBE_USABLE = 0.85                 # 上限のうち、ここまでに収まるバッチを選ぶ（おすすめで失敗させないための余裕）
+_PROBE_CLIPS = 16                    # 試し走りに使う本数。長い順に取る（いちばん VRAM を使う組み合わせで測る）
+_PROBE_STEPS = 2
+_PROBE_REF_SECONDS_SHORT = 30.0
+_PROBE_RE = re.compile(r"^VRAM probe: setup=([\d.]+) GB peak=([\d.]+) GB")
+_probe_active = False
+# 試し走りが、いま何をしているか。画面が読んで出す（待ち時間が長いので、止まって見えないようにする）。
+_probe_status: dict = {"active": False}
+
+
+class MeasureBatchRequest(BaseModel):
+    dataset: str
+    base: str
+    preset: str = "speaker_style"
+    # 本番と同じ条件で測る。コンパイルすると使う VRAM が減る（v4-Large・バッチ 8 で 11.84GB → 10.33GB、実測）ので、
+    # コンパイルなしで測ると、収まるはずのバッチを取りこぼす。空なら、このベースモデルの既定に合わせる。
+    compile_blocks: Optional[bool] = None
+    # かんたん学習が自分の工程の中から呼ぶときの合言葉（start_job と同じ扱い）
+    easy_token: Optional[str] = None
+
+
+def _probe_manifest(dataset: str, log) -> tuple[Path, int]:
+    """長い順に _PROBE_CLIPS 本だけの manifest を作る。latent が無ければ先に作る。"""
+    manifest = get_dataset_dir(dataset) / "manifest.jsonl"
+
+    def rows() -> list[dict]:
+        return [json.loads(line) for line in manifest.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+    if not manifest.is_file() or any(not Path(r["latent_path"]).is_file() for r in rows()):
+        build_manifest(dataset, log=log)
+    longest = sorted(rows(), key=lambda r: -int(r.get("num_frames", 0)))[:_PROBE_CLIPS]
+    out = lora_jobs_dir() / "_probe" / "manifest.jsonl"
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in longest), encoding="utf-8")
+    return out, len(longest)
+
+
+def _probe_once(*, config_file: Path, manifest: Path, num_clips: int, init_ckpt: Path, preset: str,
+                batch: int, ref_max_seconds: Optional[float], gradient_checkpointing: Optional[bool],
+                compile_blocks: bool) -> dict:
+    """train.py を試し走りで 1 回動かし、使った VRAM を返す。"""
+    out = lora_jobs_dir() / "_probe" / "out"
+    shutil.rmtree(out, ignore_errors=True)
+    cmd = _build_train_command(
+        config_file=config_file, manifest_path=manifest, output_dir=out, init_checkpoint=init_ckpt,
+        lora_target_modules=PRESETS[preset], max_steps=_PROBE_STEPS, batch_size=batch,
+        gradient_accumulation_steps=1, save_every=10**6, log_every=1, num_clips=num_clips, valid_clips=0,
+        gradient_checkpointing=gradient_checkpointing, compile_blocks=compile_blocks, ref_max_seconds=ref_max_seconds,
+    ) + ["--probe"]
+    env = os.environ.copy()
+    env.update(PYTHONUNBUFFERED="1", PYTHONUTF8="1", PYTHONIOENCODING="utf-8")
+    proc = subprocess.Popen(cmd, cwd=str(_PROJECT_ROOT), stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                            encoding="utf-8", errors="replace", env=env,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    # 出力を読みながら、いまの段階を控える。読み込み → コンパイル → 試しの学習、の順に進む。
+    _probe_status.update(batch=batch, phase="モデルを読み込んでいます", compile=bool(compile_blocks), run_started=time.time())
+    lines = []
+    for raw in proc.stdout:
+        line = raw.strip()
+        lines.append(line)
+        if line.startswith("torch.compile per block"):
+            _probe_status["phase"] = "コンパイルしています"
+        elif _STEP_RE.match(line):
+            _probe_status["phase"] = "試しの学習をしています"
+        if time.time() - _probe_status["run_started"] > 1800:      # 止まったまま居座らせない
+            _terminate_pid(proc.pid)
+            break
+    proc.wait()
+    found = next((m for line in lines if (m := _PROBE_RE.match(line))), None)
+    cap = next((float(m.group(1)) for line in lines if (m := _VRAM_CAP_RE.match(line))), None)
+    ok = proc.returncode == 0 and found is not None
+    params = {"batch_size": batch, "gradient_accumulation_steps": 1, "ref_max_seconds": ref_max_seconds,
+              "gradient_checkpointing": gradient_checkpointing}
+    return {"batch": batch, "ok": ok, "oom": any(_OOM_RE.search(line) for line in lines),
+            "setup_gib": float(found.group(1)) if found else None, "peak_gib": float(found.group(2)) if found else None,
+            "cap_gib": cap, "ref_max_seconds": ref_max_seconds, "gradient_checkpointing": gradient_checkpointing,
+            "error": "" if ok else failure_message(proc.returncode, lines, params)}
+
+
+def pick_batch(measured: dict) -> int:
+    """測った 1 回から、上限の _PROBE_USABLE に収まる最大のバッチを見積もる。
+
+    学習中に増える量はバッチにほぼ比例するので、(peak - setup) / batch を 1 本あたりの量とみなす。
+    """
+    per_clip = max(1e-6, (measured["peak_gib"] - measured["setup_gib"]) / measured["batch"])
+    room = measured["cap_gib"] * _PROBE_USABLE - measured["setup_gib"]
+    return next((b for b in _PROBE_CANDIDATES if per_clip * b <= room), 0)
+
+
+@router.get("/api/v1/lora/measure_batch/status")
+def measure_batch_status() -> JSONResponse:
+    """試し走りの進み具合。画面が、待っている間に出す。"""
+    s = dict(_probe_status)
+    if s.get("active"):
+        s["elapsed"] = round(time.time() - s.get("started", time.time()))
+    return JSONResponse(content=s)
+
+
+@router.post("/api/v1/lora/measure_batch")
+def measure_batch(req: MeasureBatchRequest) -> JSONResponse:
+    """おまかせ設定：この PC・この素材で収まるバッチサイズを、試し走りで測って返す。"""
+    global _probe_active
+    if req.base not in BASE_CONFIGS:
+        raise HTTPException(400, f"unknown base: {req.base}")
+    if req.preset not in PRESETS:
+        raise HTTPException(400, f"unknown preset: {req.preset}")
+    import server_easy  # lazily: server_easy imports this module
+    from irodori_tts import vram_guard
+
+    with server_easy.GPU_LOCK, _active_lock:
+        easy_busy = req.easy_token != server_easy.INTERNAL_TOKEN and server_easy.active_job_id()
+        if _active_job_id is not None or easy_busy or _probe_active:
+            raise HTTPException(409, "学習の最中は測れません。終わってから、もう一度押してください。")
+        _probe_active = True
+    started = time.time()
+    runs: list[dict] = []
+    _probe_status.clear()
+    _probe_status.update(active=True, started=started, run=0, batch=None, phase="素材を用意しています", compile=False)
+    try:
+        _free_inference_models()
+        manifest, num_clips = _probe_manifest(req.dataset, log=lambda m: print(f"[probe] {m}", flush=True))
+        base_cfg = BASE_CONFIGS[req.base]
+        manual = manual_checkpoint(base_cfg["repo_id"])
+        if manual is None and base_cfg["repo_id"] in OPTIONAL_MODELS:
+            raise HTTPException(400, missing_optional_model_message(base_cfg["repo_id"]))
+        init_ckpt = Path(manual) if manual is not None else Path(
+            hf_hub_download(repo_id=base_cfg["repo_id"], filename="model.safetensors"))
+        config_file = _PROJECT_ROOT / base_cfg["config_file"]
+        defaults = json.loads(train_defaults(req.base).body)
+        # v4-Large は参照 30 秒が標準（8本×4回・参照30秒と 4本×8回・参照120秒で、聞き比べに差が無かった）。
+        ref = _PROBE_REF_SECONDS_SHORT if req.base == "v4_large" else defaults["ref_max_seconds"]
+        grad_ckpt = defaults["gradient_checkpointing"]
+        use_compile = defaults["compile_blocks"] if req.compile_blocks is None else bool(req.compile_blocks)
+        if use_compile and not compile_available():
+            raise HTTPException(400, "この環境では「学習を速くする」を使えません（NVIDIA の GPU と Triton が必要です）。")
+
+        def run(batch: int) -> dict:
+            _probe_status["run"] = len(runs) + 1
+            result = _probe_once(config_file=config_file, manifest=manifest, num_clips=num_clips, init_ckpt=init_ckpt,
+                                 preset=req.preset, batch=batch, ref_max_seconds=ref, gradient_checkpointing=grad_ckpt,
+                                 compile_blocks=use_compile)
+            runs.append(result)
+            print(f"[probe] batch={batch} ref={ref} grad_ckpt={grad_ckpt} compile={use_compile} -> {result}", flush=True)
+            if not result["ok"] and not result["oom"]:
+                raise HTTPException(500, result["error"])   # VRAM 以外の失敗。小さくしても直らない
+            return result
+
+        # 1 回目は、いまの空きから選ぶ（1回の試し走りが v4-Large で2〜3分かかるので、当たりそうな値から始める）。
+        # 収まらなければ半分にしていく。動いても余裕が足りなければ、測った値から小さいほうを見積もる。
+        free = vram_guard.free_gib()
+        batch = 8 if (free or 0) >= 15 else 4 if (free or 0) >= 11 else 2 if (free or 0) >= 7 else 1
+        first = run(batch)
+        while not first["ok"] and batch > 1:
+            batch //= 2
+            first = run(batch)
+        if not first["ok"] and ref and ref > _PROBE_REF_SECONDS_SHORT:
+            ref = _PROBE_REF_SECONDS_SHORT           # バッチ 1 でも収まらない → 参照音声を短くする
+            first = run(1)
+        if not first["ok"] and not grad_ckpt:
+            grad_ckpt = True                         # それでも収まらない → 勾配チェックポイントを入れる
+            first = run(1)
+        if not first["ok"]:
+            raise HTTPException(507, "この PC の空き VRAM では、このモデルの学習が収まりませんでした。"
+                                     "ほかのアプリを閉じるか、軽いモデル（v4.1-Small など）を選んでください。")
+        chosen = first
+        best = pick_batch(first)
+        if best > batch:
+            bigger = run(best)                       # 見積もりで増やせるときは、実際に動かして確かめる
+            if bigger["ok"] and bigger["peak_gib"] <= bigger["cap_gib"] * _PROBE_USABLE:
+                chosen = bigger
+        elif 0 < best < batch:
+            chosen = dict(first, batch=best)         # 動きはしたが余裕が足りない → 小さいほうを選ぶ（測った値より軽い）
+        size = chosen["batch"]
+        return JSONResponse(content={
+            "batch_size": size,
+            "gradient_accumulation_steps": max(1, _PROBE_EFFECTIVE_BATCH // size),
+            "ref_max_seconds": ref,
+            "gradient_checkpointing": bool(grad_ckpt),
+            "compile_blocks": use_compile,
+            "runs": runs,
+            "seconds": round(time.time() - started, 1),
+        })
+    finally:
+        shutil.rmtree(lora_jobs_dir() / "_probe", ignore_errors=True)
+        _probe_active = False
+        _probe_status.clear()
+        _probe_status["active"] = False
 
 
 @router.post("/api/v1/lora/jobs")
@@ -1312,6 +1546,8 @@ def start_job(req: StartJobRequest) -> JSONResponse:
                 and server_easy.active_job_id()):
             raise HTTPException(
                 409, "かんたん学習の最中です。終わるまで学習を始められません。")
+        if _probe_active:
+            raise HTTPException(409, "おまかせ設定の測定中です。終わるまで学習を始められません。")
         if _active_job_id is not None:
             cur = _read_status(_active_job_id) or {}
             # 判定は _ACTIVE_STATES に一本化する。ここにタプルをベタ書きすると

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import copy
 import json
 import os
@@ -2666,6 +2667,7 @@ def build_condition_state_cache(
     use_bf16: bool,
     text_pad_id: int,
     caption_pad_id: int,
+    cache_dir: Path,
     verify_batches: int = 0,
 ):
     """Client 独自：読み取り結果の使い回し（model.ConditionStateCache）を作る。
@@ -2698,17 +2700,27 @@ def build_condition_state_cache(
                     key = ConditionStateCache.make_key(ids[i], n, pad_id)
                     rows[kind].setdefault(key, (ids[i].clone(), mask[i].clone()))
 
-    # 行ごと・2通り（元のマスク／全部 False）を最長の長さで持つので、件数が多いと
-    # 学習の前にメモリを使い切る（1万件・最長256で十数GB）。見積もりが上限を超えたら
-    # 使い回しをやめ、これまでどおり毎回計算する。上限は IRODORI_CONDITION_CACHE_MAX_GB。
+    # 行ごと・2通り（元のマスク／全部 False）を最長の長さで持つので、件数が多いと大きくなる
+    # （1万件・最長256で十数GB）。本体メモリに余裕があればメモリに、無ければディスクに置く。
+    # どちらでも使い回す（大きいからといって、黙って毎回計算する遅い動きに戻さない）。
     dims = {"text": int(base_model.cfg.text_dim),
             "caption": int(base_model.cfg.caption_dim or base_model.cfg.text_dim)}
-    estimate = sum(len(rows[k]) * max_len[k] * dims[k] * 2 * 2 for k in rows)  # bf16, 2 states
-    budget = float(os.environ.get("IRODORI_CONDITION_CACHE_MAX_GB", "4")) * 2**30
-    if estimate > budget:
-        print(f"Condition state cache skipped: needs about {estimate / 2**30:.1f} GB "
-              f"(limit {budget / 2**30:.1f} GB).", flush=True)
-        return None
+    item_bytes = 2 if use_bf16 else 4
+    estimate = sum(len(rows[k]) * max_len[k] * dims[k] * item_bytes * 2 for k in rows)  # 2 states
+    on_disk = estimate > _condition_cache_ram_budget()
+    if on_disk:
+        shutil.rmtree(cache_dir, ignore_errors=True)   # 前の学習が途中で止まって残したもの
+        cache_dir.parent.mkdir(parents=True, exist_ok=True)
+        free = shutil.disk_usage(cache_dir.parent).free
+        need = estimate + _CONDITION_CACHE_DISK_MARGIN
+        if free < need:
+            raise RuntimeError(
+                f"ディスクの空きが足りません。学習中の一時ファイルに約 {need / 2**30:.1f}GB 要りますが、"
+                f"空きは {free / 2**30:.1f}GB です（{cache_dir.parent}）。空きを増やしてから、もう一度始めてください。"
+            )
+    print(f"Condition state cache: about {estimate / 2**30:.2f} GB, "
+          + (f"on disk at {cache_dir} (removed when training ends)." if on_disk else "in system RAM."),
+          flush=True)
 
     backbone = base_model.pretrained_text_backbone
     encoders = {"text": base_model.text_encoder}
@@ -2736,8 +2748,13 @@ def build_condition_state_cache(
                 drop = torch.zeros_like(norm)
                 out_norm = encoders[kind](backbone, ids, norm).detach().cpu()
                 out_drop = encoders[kind](backbone, ids, drop).detach().cpu()
+                if on_disk and kind not in cache.disk:
+                    cache.open_disk(kind, cache_dir / f"{kind}.bin", len(items), length, dims[kind], out_norm.dtype)
                 for j, (key, _) in enumerate(chunk):
-                    cache.store[kind][key] = {"norm": out_norm[j], "drop": out_drop[j]}
+                    cache.put(kind, key, out_norm[j], out_drop[j])
+    if on_disk:
+        # 学習が終わったら消す。止められて消せなかった分は、アプリ（server_train）と次の学習の開始時が消す。
+        atexit.register(_remove_condition_cache, cache, cache_dir)
 
     if verify_batches > 0:
         _verify_condition_state_cache(
@@ -2754,6 +2771,26 @@ def build_condition_state_cache(
             batches=verify_batches,
         )
     return cache
+
+
+# 本体メモリに置く上限を決めるときに、空きから引く量。読み取り部分（T5Gemma）もこのあと本体メモリへ
+# 降ろす（約2〜4GB）ので、そのぶんと、OS・ほかのアプリの余裕を残す。足りなくなって PC が固まるより、
+# ディスクに置くほうがよいので、多めに引く。
+_CONDITION_CACHE_RAM_RESERVE = 6 * 2**30
+# ディスクに置くときに、見積もりに足して確かめる空き。
+_CONDITION_CACHE_DISK_MARGIN = 1 * 2**30
+
+
+def _condition_cache_ram_budget() -> int:
+    """読み取り結果を本体メモリに置いてよい量（バイト）。いまの空きから決める。"""
+    import psutil  # peft が要求しているので、LoRA 学習では必ず入っている
+
+    return max(0, int(psutil.virtual_memory().available) - _CONDITION_CACHE_RAM_RESERVE)
+
+
+def _remove_condition_cache(cache, cache_dir: Path) -> None:
+    cache.close()
+    shutil.rmtree(cache_dir, ignore_errors=True)
 
 
 def _has_multi_caption(datasets: list) -> bool:
@@ -3116,6 +3153,17 @@ def main() -> None:
         help=("Run validation every N training steps. Set <=0 to disable validation."),
     )
     parser.add_argument(
+        "--probe",
+        action="store_true",
+        help="Client: run the given steps, print the VRAM in use, and exit without saving anything.",
+    )
+    parser.add_argument(
+        "--valid-from-train",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Client: keep the validation clips in the training set (the validation loss is display-only).",
+    )
+    parser.add_argument(
         "--progress",
         action=argparse.BooleanOptionalAction,
         default=None,
@@ -3379,6 +3427,8 @@ def main() -> None:
         train_cfg = replace(train_cfg, valid_ratio=args.valid_ratio)
     if cli_provided(raw_argv, "--valid-every"):
         train_cfg = replace(train_cfg, valid_every=args.valid_every)
+    if args.valid_from_train is not None:
+        train_cfg = replace(train_cfg, valid_from_train=args.valid_from_train)
     if args.progress is not None:
         train_cfg = replace(train_cfg, progress=args.progress)
     if args.progress_all is not None:
@@ -4061,6 +4111,9 @@ def main() -> None:
             valid_ratio=train_cfg.valid_ratio,
             seed=train_cfg.seed,
         )
+        if train_cfg.valid_from_train:
+            # Client 独自：検証に選んだ本も学習に使う（全部の本で学習する）
+            train_indices = torch.arange(len(manifest_index.offsets), dtype=torch.int64)
         train_dataset = LatentTextDataset(
             manifest_path=train_cfg.manifest_path,
             latent_dim=model_cfg.latent_dim,
@@ -4534,6 +4587,7 @@ def main() -> None:
                 use_bf16=use_bf16,
                 text_pad_id=tokenizer.pad_token_id,
                 caption_pad_id=caption_pad,
+                cache_dir=Path(train_cfg.output_dir) / "_condition_cache",
                 verify_batches=verify,
             )
             _close_dataset_files([train_dataset, valid_dataset])
@@ -4812,6 +4866,11 @@ def main() -> None:
             else 0
         )
         last_epoch_step = epoch_step_offset
+        # Client 独自：試し走り（--probe）で、学習が始まる前に持っている量を控える
+        probe_setup_gib = torch.cuda.memory_reserved() / 2**30 if torch.cuda.is_available() else 0.0
+        if args.probe and torch.cuda.is_available():
+            # 読み込み中の一時的な山（元の重みを bf16 にする前など）を、学習の使用量に数えない
+            torch.cuda.reset_peak_memory_stats()
         while step < train_cfg.max_steps:
             if train_sampler is not None and not resume_loader_state_loaded:
                 train_sampler.set_epoch(epoch)
@@ -5506,6 +5565,13 @@ def main() -> None:
                         )
                     )
 
+        if args.probe:
+            # Client 独自：おまかせ設定の試し走り。何も保存せず、使った VRAM だけを出して終わる。
+            if is_main_process:
+                peak = torch.cuda.max_memory_reserved() / 2**30 if torch.cuda.is_available() else 0.0
+                alloc = torch.cuda.max_memory_allocated() / 2**30 if torch.cuda.is_available() else 0.0
+                print(f"VRAM probe: setup={probe_setup_gib:.2f} GB peak={peak:.2f} GB alloc={alloc:.2f} GB", flush=True)
+            return
         final_dataloader_state = _collect_dataloader_state(
             loader,
             distributed=distributed,

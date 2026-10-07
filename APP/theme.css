@@ -419,6 +419,18 @@ body.no-aside .corner-side-r { display:none; }
   opacity:0; pointer-events:none; transition:opacity .12s .25s;
 }
 .tip:hover::after, .tip:focus-visible::after { opacity:1; }
+/* title 属性の説明を、OS の灰色の箱ではなく、上の .tip と同じ見た目で出す（renderer.js の setupThemedTooltips）。
+   入力欄やプルダウンには ::after が付けられないので、1つの箱を動かして使う。長い文は折り返す。 */
+.app-tip {
+  position:fixed; left:-9999px; top:0; z-index:9999; max-width:340px;
+  padding:5px 9px; white-space:normal;
+  font-size:10.5px; font-weight:500; line-height:1.6; letter-spacing:.04em;
+  color:var(--text); background:var(--l3);
+  border:1px solid var(--gold-dim); border-radius:0;
+  box-shadow:var(--e1);
+  opacity:0; pointer-events:none; transition:opacity .12s .25s;
+}
+.app-tip.show { opacity:1; }
 
 /* ══ タグ ══ */
 .tags { border-top:1px solid var(--line); }
@@ -483,6 +495,12 @@ details[open] > summary .chev { transform:rotate(90deg); }
 }
 .f > label .en, .param-group > label .en {
   color:var(--faint);font-size:10px;font-family:"Cascadia Mono",Consolas,monospace;
+}
+/* 日本語の補足（単位や一言の説明）。.en は英名用で、英字の等幅フォントを当てている。日本語を入れると
+   その字だけ別のフォントに落ちて、字形と太さが不ぞろいになる。日本語の補足は本文のフォントのまま小さく出す。 */
+.f > label > .sub, .param-group > label > .sub {
+  min-width:0; overflow:hidden; text-overflow:ellipsis;
+  color:var(--faint); font-size:10px;
 }
 /* 値は行の右端へ。数字は等幅にして桁が変わっても列が動かないようにする */
 .f .v, .param-group .v {
@@ -558,6 +576,9 @@ input[type="range"]::-webkit-slider-thumb {
 .take .acts button:hover { background:rgba(255,255,255,.07);color:var(--text); }
 .take.busy .wave { animation:pulse 1.5s ease-in-out infinite; }
 @keyframes pulse { 0%,100%{opacity:.35} 50%{opacity:.8} }
+/* 長く待つ処理の途中の表示。止まって見えないよう、ゆっくり明滅させる */
+.note.busy { animation: busy-blink 1.6s ease-in-out infinite; color: var(--gold); }
+@keyframes busy-blink { 0%,100%{opacity:1} 50%{opacity:.45} }
 .take.busy .play { animation:ring 1.5s ease-out infinite; }
 @keyframes ring { 0%{box-shadow:0 0 0 0 var(--accent-ln)} 100%{box-shadow:0 0 0 10px transparent} }
 
@@ -1115,6 +1136,9 @@ textarea, .glass-textarea { height:auto; padding:8px 10px; font-size:14px; line-
 .cfg .param-group { margin:0; min-width:0; }
 .cfg .wide { grid-column:1 / -1; }
 .cfg input, .cfg select { width:100%; }
+/* チェックボックスとラジオは、幅を広げない。広げると、四角が広い箱の真ん中に描かれて、
+   文字とのあいだが大きく空く（学習タブの「勾配チェックポイント」「学習を速くする」など）。 */
+.cfg input[type="checkbox"], .cfg input[type="radio"] { width:auto; }
 
 .act-row {
   display:flex; align-items:center; gap:8px; flex-wrap:wrap;
