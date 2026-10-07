@@ -146,8 +146,7 @@ if __name__ == "__main__":
     assert s["state"] == "done", f"state={s['state']} error={s.get('error')}"
     picked = s.get("picked")
     assert picked, "採用の記録がない"
-    print(f"  採用: {picked['name']} sim={picked['sim']:.3f} cer={picked['cer']:.3f}"
-          f" fallback={picked['fallback']}")
+    print(f"  採用: {picked['name']} sim={picked['sim']:.3f} cer={picked['cer']:.3f}")
     loras = get("/loras")
     items = loras if isinstance(loras, list) else loras.get("loras", [])
     names = [x.get("name") if isinstance(x, dict) else x for x in items]
