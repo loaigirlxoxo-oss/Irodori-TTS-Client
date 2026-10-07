@@ -21,7 +21,7 @@ Irodori-TTS Client App は、他の方が作ったソフトウェアとモデル
 | 夜永オールド明朝 Bold（`YonagaOldMincho-Bold.woff2`） | SIL Open Font License 1.1 | Copyright (c) 2023, ichi, with Reserved Font Name 'Yonaga' | `assets\OFL.txt`（アプリ内）／このファイルの末尾に全文 |
 
 **Git と uv は同梱していません。** 本アプリの導入・実行に Git も uv も使いません。
-上流リポジトリの手順では両方が必要ですが、本アプリは Python を同梱し、
+公式リポジトリの手順では両方が必要ですが、本アプリは Python を同梱し、
 依存の取得は同梱の pip が行います。
 
 ---
@@ -86,7 +86,7 @@ v4-Large の軽量版を読み込む `torchao`（BSD-3-Clause）も、同じよ�
 | `phasefield-audio/Irodori-TTS-v4.1-Anime` | 任意追加のアニメ調モデル | MIT（倫理的な制限はベースモデルを引き継ぎます） |
 | `Qwen/Qwen3-ASR-1.7B-hf` | 書き起こし（データセットタブで選んだとき） | Apache-2.0 |
 
-これらは初回準備の取得対象に入れていません。Anime は使いたい人が手で置くもの、Qwen3-ASR はデータセットタブで選んだ人が画面から取得するものです。
+どちらも、最初から選ばれているモデルには入っていません。Anime は、初回の準備の画面か設定（右上の歯車）で選んだ人が取得します（以前の版のように手で置いたものも使えます）。Qwen3-ASR は、データセットタブで選んだ人が画面から取得します。
 
 ---
 
