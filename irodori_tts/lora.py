@@ -297,6 +297,26 @@ def load_lora_adapter(
     )
 
 
+def set_lora_scale(model: torch.nn.Module, adapter_name: str, scale: float) -> int:
+    """Multiply the LoRA delta of one adapter by `scale`. Returns how many layers were touched.
+
+    PEFT adds `scaling[adapter] * B(A(x))` per layer, where scaling is alpha / r (or alpha / sqrt(r)
+    with rsLoRA). The value the adapter was loaded with is remembered on first use, so calling this
+    again always scales from the original, never from the last request. Call it with 1.0 to restore.
+    Modules saved whole (modules_to_save, e.g. duration_predictor) have no scaling and stay as loaded.
+    """
+    touched = 0
+    for module in model.modules():
+        scaling = getattr(module, "scaling", None)
+        if not isinstance(scaling, dict) or adapter_name not in scaling:
+            continue
+        base = module.__dict__.setdefault("_irodori_base_scaling", {})
+        base.setdefault(adapter_name, float(scaling[adapter_name]))
+        scaling[adapter_name] = base[adapter_name] * float(scale)
+        touched += 1
+    return touched
+
+
 def count_parameters(model: torch.nn.Module) -> tuple[int, int]:
     trainable = sum(int(param.numel()) for param in model.parameters() if param.requires_grad)
     total = sum(int(param.numel()) for param in model.parameters())

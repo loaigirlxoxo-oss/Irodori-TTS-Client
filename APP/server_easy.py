@@ -67,12 +67,33 @@ def _is_untouched_old_copy(target: Path) -> bool:
         return False        # 判断できないときは触らない（手で直したものを消さない側に倒す）
     return hashlib.sha256(text).hexdigest() in past
 
+
 # 学習素材にする文の長さ。短い文を入れない理由は2つある。数文字の音声だと
 # Whisper が前後を埋めようとして幻聴を起こし、CER が実態と無関係に悪化する。
 # SIM も1秒に満たない音声では speaker embedding が安定せず、似ているかどうかの
 # 判定にならない。ランタイム側にも ref_min_seconds=1.0 の下限がある。
-MIN_LEN = 20
+#
+# 2026-10-10: 下限を 20 字から 5 字に下げた。性格の型ごとの台本（easy_scripts）は、相槌や驚きのような
+# 短い行が 4 割あり、20 字では読み込めない。似ている度は短い行でも使えた（実測。相槌の枠で、ほかの枠と
+# 同じ水準）。書き起こしの幻聴は短い行で実際に起きるので、CER_MIN_LEN より短い行は、読み間違いの判定だけ外す。
+MIN_LEN = 5
 MAX_LEN = 200
+CER_MIN_LEN = 20
+
+# 性格の型ごとの台本。同梱のものをそのまま読む（data の下への写しは作らない。「編集」で開くのは、
+# 型を選ばないときに使う easy_train_lines.txt だけ）。
+# 暫定: 利用者が型ごとの台本を手で直す道は、まだ無い。直せるようにするには、easy_train_lines.txt と同じ
+# 「写しを作り、手を入れていない写しだけ更新する」仕組みを、型ごとに持たせる必要がある。
+SCRIPT_DIR = PRESET_DIR / "easy_scripts"
+SCRIPT_TYPES: tuple[tuple[str, str, str], ...] = (
+    ("kachiki", "勝ち気", "強気で言い返す。照れると強がる"),
+    ("ottori", "おっとり", "ていねいで、ゆっくり。包みこむように話す"),
+    ("genki", "元気", "明るく、感情がそのまま大きく出る"),
+    ("cool", "クール", "短く言い切る。感情をあまり表に出さない"),
+    ("amaenbo", "甘えんぼ", "くっついて、わがままを言って甘える"),
+    ("oneesan", "お姉さん", "余裕があり、からかいながら導く"),
+    ("mesugaki", "メスガキ", "相手を下に見て、あおる"),
+)
 
 # 日本語テキストに紛れ込みやすい他言語のブロック（ハングル・ハングル字母・キリル）。
 _FOREIGN_RANGES = (
@@ -99,11 +120,49 @@ def _foreign_chars(text: str) -> list[str]:
     return out
 
 
-def load_lines(path: str | Path | None = None, min_len: int = MIN_LEN) -> list[tuple[str, str]]:
-    """(タグ, 本文) の列を返す。壊れていれば LineError。
+def script_file(script: str | None) -> Path | None:
+    """型の名前から、同梱の台本の場所を返す。型を選ばないとき（空）は None。"""
+    if not script:
+        return None
+    if script not in {key for key, _, _ in SCRIPT_TYPES}:
+        raise LineError(f"台本の型がありません: {script}")
+    return SCRIPT_DIR / f"{script}.txt"
 
-    `## ` で始まる行は見出し、`#` で始まる行と空行は無視する。それ以外は
-    「タグ 本文」の形で、タグはそのまま TTS に渡る感情の絵文字。
+
+# 枠ごとの「>> 名前=値」で書ける設定。素材を作るときだけ使い、学習に渡す文には影響しない。
+_FRAME_SETTINGS = ("説明文", "LoRA強さ")
+
+
+def _split_tag(line: str) -> tuple[str, str, str]:
+    """1 行を (タグ, 本文, TTS に渡す文) に分ける。分けられなければ LineError。
+
+    行頭に並んだ絵文字をタグとする。「🙏 本文」と「🙏本文」のどちらの書き方も読む。TTS に渡す文は
+    書かれたとおりにする（空白の有無を変えない）。行頭が絵文字でない行は、最初の空白までをタグとする。
+    """
+    head = re.match(rf"^((?:{_STYLE_TAG_RE.pattern})+)(\s*)(.+)$", line)
+    if head and head.group(3).strip():
+        tag, gap, body = head.group(1), head.group(2), head.group(3).strip()
+        return tag, body, f"{tag}{' ' if gap else ''}{body}"
+    spaced = re.match(r"^(\S+)\s+(.+)$", line)
+    if not spaced:
+        raise LineError(f"タグと本文に分けられません: {line[:40]}")
+    tag, body = spaced.group(1), spaced.group(2).strip()
+    return tag, body, f"{tag} {body}"
+
+
+def load_script(path: str | Path | None = None, min_len: int = MIN_LEN) -> list[dict]:
+    """台本を読んで、行ごとの dict の列を返す。壊れていれば LineError。
+
+    書式:
+      `## 見出し`      … 枠の名前。次の見出しまでが 1 つの枠
+      `> 文`           … その枠の演技の説明文（素材を作るときに、声の説明文のあとに付けて渡す）
+      `>> 説明文=文`   … 素材を作るときだけ、`> ` の文の代わりに使う説明文
+      `>> LoRA強さ=数` … 素材を作るときの、演技 LoRA の強さ（書かなければ 1.0）
+      `#` で始まる行と空行は無視する。それ以外はセリフ（行頭の絵文字がタグ）。
+    見出しと `> ` の行が無い台本（easy_train_lines.txt の書式）も、そのまま読める。
+
+    返す dict: tag（行頭の絵文字）, body（本文）, text（TTS と学習に渡す文）, frame（枠の名前）,
+    caption（素材を作るときの説明文。無ければ空）, lora_scale（演技 LoRA の強さ）。
     """
     target = Path(path) if path else user_lines_file()
     if not target.is_file():
@@ -116,17 +175,35 @@ def load_lines(path: str | Path | None = None, min_len: int = MIN_LEN) -> list[t
         found = "".join(sorted(set(foreign)))[:20]
         raise LineError(f"他言語の文字が混ざっています: {found}")
 
-    out: list[tuple[str, str]] = []
+    out: list[dict] = []
+    frame, caption, settings = "", "", {}
     for raw in text.split("\n"):
         line = raw.strip()
+        if line.startswith("## "):
+            frame, caption, settings = line[3:].strip(), "", {}
+            continue
+        if line.startswith(">>"):
+            name, sep, value = line[2:].partition("=")
+            name, value = name.strip(), value.strip()
+            if not sep or name not in _FRAME_SETTINGS or not value:
+                raise LineError(f"読めない設定です（使えるのは {'・'.join(_FRAME_SETTINGS)}）: {line[:40]}")
+            if name == "LoRA強さ":
+                try:
+                    settings[name] = float(value)
+                except ValueError as exc:
+                    raise LineError(f"LoRA強さ が数ではありません: {line[:40]}") from exc
+                if not 0.0 < settings[name] <= 3.0:
+                    raise LineError(f"LoRA強さ は 0 より大きく 3 以下にしてください: {line[:40]}")
+            else:
+                settings[name] = value
+            continue
+        if line.startswith(">"):
+            caption = line[1:].strip()
+            continue
         if not line or line.startswith("#"):
             continue
 
-        matched = re.match(r"^(\S+)\s+(.+)$", line)
-        if not matched:
-            raise LineError(f"タグと本文に分けられません: {line[:40]}")
-
-        tag, body = matched.group(1), matched.group(2).strip()
+        tag, body, spoken = _split_tag(line)
 
         if not min_len <= len(body) <= MAX_LEN:
             raise LineError(
@@ -138,9 +215,16 @@ def load_lines(path: str | Path | None = None, min_len: int = MIN_LEN) -> list[t
         if re.search(r"\S　\S　\S", body):
             raise LineError(f"全角スペース区切りは変に鳴ります: {body[:30]}")
 
-        out.append((tag, body))
+        out.append({"tag": tag, "body": body, "text": spoken, "frame": frame,
+                    "caption": settings.get("説明文", caption),
+                    "lora_scale": settings.get("LoRA強さ", 1.0)})
 
     return out
+
+
+def load_lines(path: str | Path | None = None, min_len: int = MIN_LEN) -> list[tuple[str, str]]:
+    """(タグ, 本文) の列を返す。壊れていれば LineError。書式は load_script と同じ。"""
+    return [(row["tag"], row["body"]) for row in load_script(path, min_len)]
 
 
 # 評価文は短文も測る（驚き・怒りなどの一言）。学習文の下限 MIN_LEN は
@@ -183,6 +267,12 @@ class GenerateRequest(BaseModel):
     # 素材に透かしを入れるか。入れない素材（既定）は、学習のあとで消す約束で作る（TrainRequest.delete_materials）。
     watermark: bool = Field(False, description="素材に電子透かしを入れる（入れた素材は消さずに残す）")
     limit: int | None = Field(None, ge=1, description="試験用。既定は全件")
+    # 台本の型（SCRIPT_TYPES の名前）。空なら、編集できる easy_train_lines.txt を読む（これまでどおり）。
+    script: str = Field("", description="台本の型。空なら easy_train_lines.txt")
+    # 素材を作るときに当てる演技 LoRA の名前。空なら当てない（これまでどおり）。
+    acting_lora: str = Field("", description="素材づくりに当てる演技 LoRA。空なら当てない")
+    # 声を作るときに書いた声の説明文。台本の枠の説明文の前に付けて渡す。
+    voice_caption: str = Field("", description="声の説明文。枠の説明文の前に付ける")
     dataset: str | None = Field(
         None, description="指定すると生成後にこの名前でデータセットを作る"
     )
@@ -280,8 +370,8 @@ def _read_status(job_id: str) -> dict | None:
     return None
 
 
-def _api_base() -> str:
-    """自分の口の URL。ポートは server が決めたものに合わせる。
+def _server_module():
+    """読み込み済みの server モジュール。
 
     `python server.py` で起動すると server は __main__ なので、`import server`
     は同じファイルを二重に読んでしまう。すでに読まれているものを使う。
@@ -293,8 +383,12 @@ def _api_base() -> str:
         mod = sys.modules.get("__main__")
     if mod is None or not hasattr(mod, "listen_port"):
         import server as mod  # テストから直接使うとき
+    return mod
 
-    return f"http://127.0.0.1:{mod.listen_port()}/api/v1"
+
+def _api_base() -> str:
+    """自分の口の URL。ポートは server が決めたものに合わせる。"""
+    return f"http://127.0.0.1:{_server_module().listen_port()}/api/v1"
 
 
 def _allowed_audio_roots() -> list[Path]:
@@ -342,12 +436,14 @@ def _resolve_wav(path_or_url: str) -> Path:
 
 
 def _synthesize_one(text: str, ref_wav: str | None, model_type: str,
-                    lora: str | None = None, seed: int | None = None, watermark: bool = False) -> str:
+                    lora: str | None = None, seed: int | None = None, watermark: bool = False,
+                    extra: dict | None = None) -> str:
     """1本合成して、出力 wav の絶対パスを返す。ref_wav が None なら参照なしで読む。
 
     watermark が False なら透かしを入れない（学習用の素材と、測ったら消す評価用の音声）。
+    extra は /synthesize にそのまま足す項目（説明文、LoRA の強さなど）。
     """
-    payload: dict = {"text": text, "model_type": model_type, "easy_token": INTERNAL_TOKEN}
+    payload: dict = {"text": text, "model_type": model_type, "easy_token": INTERNAL_TOKEN, **(extra or {})}
     if watermark:
         payload["easy_watermark"] = True
     if ref_wav:
@@ -377,23 +473,74 @@ def strip_style_tags(text: str) -> str:
     return _STYLE_TAG_RE.sub("", text).strip()
 
 
+# 演技 LoRA を当てて素材を作るときの、参照音声への寄せ方。演技 LoRA を当てると声が参照から離れやすいので、
+# 寄せる力を強める（2026-10-04 の作り直しから使ってきた値。kv 1.1、話者 CFG 8）。
+ACTING_SPEAKER_KV = 1.1
+ACTING_CFG_SPEAKER = 8.0
+
+
+def generation_extra(row: dict, req: "GenerateRequest") -> dict:
+    """台本の 1 行を読ませるときに、/synthesize に足す項目。
+
+    説明文は、枠に説明文があるときだけ渡す（声の説明文＋枠の説明文）。演技 LoRA を選んでいれば、
+    その名前と、枠ごとの強さ、参照音声への寄せ方を渡す。どちらも無ければ空で、これまでと同じ鳴り方になる。
+    """
+    extra: dict = {}
+    if row["caption"]:
+        extra["caption"] = (req.voice_caption.strip() + row["caption"]).strip()
+    if req.acting_lora:
+        extra.update(lora_name=req.acting_lora, lora_scale=row["lora_scale"],
+                     speaker_kv_scale=ACTING_SPEAKER_KV, cfg_scale_speaker=ACTING_CFG_SPEAKER)
+    return extra
+
+
+# 選別で落ちた本を作り直す回数。1 回で通る本が多く、何度やっても通らない行は台本のほうに原因があるので、
+# 2 回で打ち切る（残りは、これまでどおり上位 7 割までの補充に任せる）。
+REDO_ROUNDS = 2
+
+
+def _redo_dropped(scored: list[dict], kept: list[dict], req: "GenerateRequest") -> int:
+    """選別で落ちた本を、同じ設定・別の乱数で作り直して、同じ場所に置きかえる。作り直した本数を返す。
+
+    作り直した本からは評価値（sim・cer）を外す。次の選別で、その本だけが測り直される。
+    """
+    keep = {c["path"] for c in kept}
+    count = 0
+    for clip in scored:
+        if clip["path"] in keep:
+            continue
+        fresh = _synthesize_one(clip["text"], req.ref_wav, req.model_type, watermark=req.watermark,
+                                extra=clip.get("extra"))
+        shutil.move(fresh, clip["path"])
+        for key in ("sim", "cer", "eval_failed"):
+            clip.pop(key, None)
+        count += 1
+    return count
+
+
 def _run_generate(job_id: str, req: GenerateRequest) -> None:
     status = _read_status(job_id) or {}
     try:
-        rows = load_lines()
+        rows = load_script(script_file(req.script))
         if req.limit:
             rows = rows[: req.limit]
         status.update(done=0, clips=[], state="running")
         _write_status(job_id, status)
 
-        for tag, body in rows:
-            path = _synthesize_one(f"{tag} {body}", req.ref_wav, req.model_type, watermark=req.watermark)
+        for row in rows:
+            tag, body = row["tag"], row["body"]
+            extra = generation_extra(row, req)
+            path = _synthesize_one(row["text"], req.ref_wav, req.model_type, watermark=req.watermark, extra=extra)
             # 学習データの文にも、生成のときと同じ絵文字を残す（2026-10-04 に変更）。作者の回答では、
             # 学習テキストに絵文字が無いと絵文字での制御が弱まり、感情を強くかけたとき声が変わる
             # （Aratako/Irodori-TTS Issue #8）。plain は絵文字を外した文で、読み間違いを測るときにだけ使う
             # （書き起こしには絵文字が出ないので、絵文字つきの文と比べると全部が誤りに数えられる）。
-            status["clips"].append({"path": path, "text": f"{tag} {body}",
-                                    "plain": strip_style_tags(body), "tag": tag})
+            # frame は選別が枠ごとに足切りを決めるのに使う。short は、読み間違いの判定を外す印
+            # （短い行は書き起こしが幻聴を起こしやすい。CER_MIN_LEN の説明を参照）。
+            plain = strip_style_tags(body)
+            # extra は、選別で落ちたときに同じ設定で作り直すために持っておく。
+            status["clips"].append({"path": path, "text": row["text"], "plain": plain, "tag": tag,
+                                    "frame": row["frame"], "short": len(plain) < CER_MIN_LEN, "extra": extra})
             status["done"] = len(status["clips"])
             _write_status(job_id, status)
 
@@ -406,15 +553,16 @@ def _run_generate(job_id: str, req: GenerateRequest) -> None:
 
             # 生成しただけの本には失敗作が混ざる。そのまま学習させると
             # LoRA が崩れごと覚えるので、ここで選別する。
-            from easy_eval import release_runtime, screen_clips
+            from easy_eval import release_eval_models, release_runtime, screen_clips
 
-            # 選別は ECAPA と書き起こしを載せる。合成のランタイムを抱えたまま
+            busy = RuntimeError(
+                "他の生成が続いていて、いまは選別に移れません。"
+                "生成タブの処理が終わってからやり直してください。"
+            )
+            # 選別は声の近さのモデルと書き起こしを載せる。合成のランタイムを抱えたまま
             # だと 8GB に収まらないので、ここで返す。次に鳴らすときに読み直す。
             if not release_runtime():
-                raise RuntimeError(
-                    "他の生成が続いていて、いまは選別に移れません。"
-                    "生成タブの処理が終わってからやり直してください。"
-                )
+                raise busy
 
             status["state"] = "screening"
             status["screened"] = 0
@@ -425,7 +573,34 @@ def _run_generate(job_id: str, req: GenerateRequest) -> None:
                 status["screen_total"] = total
                 _write_status(job_id, status)
 
-            kept, report = screen_clips(status["clips"], req.ref_wav, _tick)
+            scored: list[dict] = []
+            kept, report = screen_clips(status["clips"], req.ref_wav, _tick, scored_out=scored)
+            # 落ちた本は、乱数を変えて作り直し、もう一度選別する。落とすだけだと素材が減り、
+            # 喘ぎのように落ちやすい枠が学習データから抜ける。
+            redone = 0
+            for _ in range(REDO_ROUNDS):
+                if len(kept) == len(scored):
+                    break
+                # 作り直しは合成のランタイムを使う。選別の道具と同時には 8GB に載らないので、入れ替える。
+                if not release_eval_models():
+                    break       # 返せないなら作り直しはあきらめ、いまの選別の結果で進む
+                try:
+                    made = _redo_dropped(scored, kept, req)
+                except Exception as exc:  # noqa: BLE001 - 作り直しは足し算。失敗しても、通った本は使える
+                    # 作り直しの途中で合成ができなくなることがある（ほかの処理が GPU を使い始めた、など）。
+                    # ここで工程を失敗にすると、選別を通った素材ごと捨てることになる。作り直しをやめて先へ進む。
+                    # 途中まで置きかえた本は、どれも選別で落ちた本なので、通った本（kept）には含まれない。
+                    status["warn"] = (f"落ちた本の作り直しができませんでした（{type(exc).__name__}: {exc}）。"
+                                      "作り直さずに、通った本だけで進めます。")
+                    break
+                status["redo"] = redone = redone + made
+                _write_status(job_id, status)
+                if not release_runtime():
+                    raise busy
+                again: list[dict] = []
+                kept, report = screen_clips(scored, req.ref_wav, _tick, scored_out=again)
+                scored = again
+            report["redone"] = redone
             status["screen"] = report
             _write_sample_list(req.dataset, status["clips"], kept)
 
@@ -996,21 +1171,44 @@ def start_folder(req: FolderRequest) -> JSONResponse:
 
 
 @router.get("/api/v1/easy/lines")
-def get_lines() -> JSONResponse:
+def get_lines(script: str = "") -> JSONResponse:
     """セリフの本数とタグ数。UI が「そのまま進めるか」を判断する材料。
 
+    script に型の名前を渡すと、その型の台本を数える。空なら編集できる easy_train_lines.txt。
     壊れていたら 400 で理由を返す。生成を始めてから気づくと402本を作り直す
     ことになるので、タブを開いた時点で分かるようにする。
     """
     try:
-        rows = load_lines()
+        rows = load_script(script_file(script))
     except LineError as exc:
         raise HTTPException(400, str(exc)) from exc
     return JSONResponse(content={
         "count": len(rows),
-        "tags": len({tag for tag, _ in rows}),
-        "path": str(user_lines_file()),
+        "tags": len({row["tag"] for row in rows}),
+        "path": str(script_file(script) or user_lines_file()),
+        "editable": not script,
+        "scripts": [{"key": key, "label": label, "note": note} for key, label, note in SCRIPT_TYPES],
     })
+
+
+def _check_acting_lora(name: str, model_type: str) -> None:
+    """演技 LoRA が、素材を作るモデルに当てられるか。当てられなければ 400。
+
+    /synthesize も同じ判定で断るが、そちらに任せると、1 本目を作る段になってから工程が失敗する。
+    """
+    if not name:
+        return
+    import server_lora
+
+    server = _server_module()
+    try:
+        server_lora.resolve_lora_adapter_path(name)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    base = server_lora.lora_base_of(name)
+    if base and not server.is_lora_compatible(base, model_type):
+        raise HTTPException(400, f"演技 LoRA「{name}」は {server.model_label(base)} で学習されています。"
+                                 f"{server.model_label(model_type)} の素材づくりには当てられません")
 
 
 @router.post("/api/v1/easy/generate")
@@ -1020,11 +1218,12 @@ def start_generate(req: GenerateRequest) -> JSONResponse:
         raise HTTPException(400, f"参照音声がありません: {req.ref_wav}")
     req.ref_wav = str(ref)
     try:
-        rows = load_lines()
+        rows = load_script(script_file(req.script))
     except LineError as exc:
         raise HTTPException(400, str(exc)) from exc
     if req.limit:
         rows = rows[: req.limit]
+    _check_acting_lora(req.acting_lora, req.model_type)
 
     # total はここで確定させる。スレッドが走り出す前に UI が進捗を取りに来ると
     # 0 が返り、進捗バーが一瞬空になる。

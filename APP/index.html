@@ -82,6 +82,12 @@
                 <select id="lora-select" class="hidden"></select>
                 <span id="lora-voice-hint" class="note warn" style="display:none;"></span>
               </div>
+              <div class="easy-knob hidden" id="lora-scale-row">
+                <label for="lora-scale">LoRA の強さ <span class="v" id="lora-scale-val">1.0</span></label>
+                <input type="range" id="lora-scale" min="0.1" max="2" step="0.1" value="1" />
+                <div class="easy-ends"><span>弱い</span><span>強い</span></div>
+                <p class="note">1.0 が学習したままの効き方です。上げると LoRA の特徴が強く出ますが、発音が崩れやすくなります。</p>
+              </div>
               <button id="manage-loras-btn" class="btn btn-ghost btn-sm">LoRA を管理</button>
             </div>
           </section>
@@ -434,14 +440,16 @@
             </div>
 
             <div id="easy-src-design">
-              <label for="easy-caption">どんな声にしますか</label>
+              <div class="easy-label-row">
+                <label for="easy-caption">どんな声にしますか</label>
+                <button type="button" id="easy-tips-toggle" class="easy-tips-link"
+                        aria-expanded="false" aria-controls="easy-tips">書き方のコツ</button>
+              </div>
               <input id="easy-caption" type="text" placeholder="落ち着いた大人の女性話者。低く甘い声で、ゆったり話している。" />
 
               <!-- 効く語と例文。数字は v4.1 の実測（同じ本文・seed 3つの平均、
                    「女性話者。」= F0 244Hz / 5.88秒 を基準にした差）。 -->
-              <details class="easy-fold" style="margin-top:6px">
-                <summary>書き方のコツと、効く言葉</summary>
-                <div class="easy-fold-body">
+              <div id="easy-tips" class="easy-tips-panel hidden">
                   <ol class="easy-tips">
                     <li>性別と年齢を、先に名詞で言い切る（<b>幼い女性話者</b> / <b>大人の男性</b>）</li>
                     <li>声質は1つだけ足す（かすれた・鼻にかかった・細い）</li>
@@ -487,8 +495,7 @@
                     同じ文でも引くたびに声は変わります。気に入らなければ seed を空にして
                     生成し直すか、seed を入れて同じ声を出し直してください。
                   </p>
-                </div>
-              </details>
+              </div>
             </div>
 
             <div id="easy-src-folder" class="hidden">
@@ -551,8 +558,19 @@
 
             <audio id="easy-preview" controls style="width:100%;margin-top:8px;display:none"></audio>
 
-            <label for="easy-lora-name" style="margin-top:12px">この声につける名前</label>
-            <input id="easy-lora-name" type="text" placeholder="みどり" />
+            <div class="two" style="margin-top:12px">
+              <div class="param-group">
+                <label for="easy-lora-name">この声につける名前</label>
+                <input id="easy-lora-name" type="text" placeholder="みどり" />
+              </div>
+              <div class="param-group">
+                <label for="easy-script">セリフ集の型</label>
+                <select id="easy-script" title="決めた声に読ませるセリフ集。声の性格に近い型を選ぶと、演技がセリフに合います。フォルダの音声を使うときは使いません">
+                  <option value="">標準（いろいろな言い方）</option>
+                </select>
+                <p id="easy-script-note" class="note"></p>
+              </div>
+            </div>
 
             <div class="two" style="margin-top:12px">
               <div class="param-group">
@@ -578,9 +596,16 @@
               </div>
             </div>
 
-
-            <label class="chk" style="margin-top:12px"><input type="checkbox" id="easy-no-wm" checked> 学習の素材に電子透かしを入れない（おすすめ）</label>
-            <p id="easy-wm-note" class="note warn"></p>
+            <div class="two easy-checks" style="margin-top:12px">
+              <div>
+                <label class="chk"><input type="checkbox" id="easy-acting"> 演技LoRAを使って素材を作る</label>
+                <p id="easy-acting-note" class="note"></p>
+              </div>
+              <div>
+                <label class="chk"><input type="checkbox" id="easy-no-wm" checked> 学習の素材に電子透かしを入れない（おすすめ）</label>
+                <p id="easy-wm-note" class="note warn"></p>
+              </div>
+            </div>
 
             <details class="easy-fold" style="margin-top:12px">
               <summary>声の微調整</summary>

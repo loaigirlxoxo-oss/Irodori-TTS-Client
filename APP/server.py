@@ -618,6 +618,13 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
     rescale_sigma = parse_float(str(data.get("rescale_sigma", "None")))
 
     speaker_kv_scale = parse_float(str(data.get("speaker_kv_scale", "None")))
+    # LoRA の強さ（1.0 が学習したまま）。LoRA を使わないリクエストでは意味を持たない。
+    lora_scale = parse_float(str(data.get("lora_scale", "1.0")))
+    if lora_scale is None:
+        lora_scale = 1.0
+    if not 0.0 < lora_scale <= 3.0:
+        return JSONResponse(status_code=400, content={
+            "error": f"lora_scale は 0 より大きく 3 以下にしてください（受け取った値: {lora_scale}）"})
     speaker_kv_min_t = parse_float(str(data.get("speaker_kv_min_t", "0.9"))) or 0.9
     speaker_kv_max_layers = parse_int(str(data.get("speaker_kv_max_layers", "None")))
 
@@ -660,7 +667,7 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
     # どのパラメータが効いたのかを後から突き合わせられるようにする。
     # 標準出力は cp932 なので、非対応文字で落ちないよう ASCII に退避する。
     _msg = (
-        f"[synth] text={text!r} model={model_type} lora={data.get('lora_name')!r} "
+        f"[synth] text={text!r} model={model_type} lora={data.get('lora_name')!r} lora_scale={lora_scale} "
         f"steps={num_steps} seed={seed} dur_scale={duration_scale} "
         f"cfg_text={cfg_scale_text} cfg_spk={cfg_scale_speaker} cfg_cap={cfg_scale_caption} "
         f"mode={cfg_guidance_mode} t_sched={t_schedule_mode} "
@@ -780,7 +787,10 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
                 "num_candidates": num_candidates,
                 "decode_mode": "sequential",
                 "seconds": None,
-                "max_ref_seconds": 30.0,
+                # 参照音声の上限は渡さない。渡さなければ、エンジンがモデルに入っている値を使う
+                # （v4 系は 120 秒、値を持たない v2・v3 は 30 秒）。以前は 30 秒を固定で渡していて、
+                # 30 秒を超える参照音声が、知らせずに切られていた。
+                "max_ref_seconds": None,
                 "max_text_len": max_text_len,
                 "num_steps": num_steps,
                 "seed": seed,
@@ -807,6 +817,7 @@ async def synthesize(request: Request, voice_id: Optional[str] = None):
                 "sway_coeff": sway_coeff,
 
                 "lora_adapter": lora_adapter_path,
+                "lora_scale": lora_scale,
 
                 "trim_tail": trim_tail,
             }
@@ -1070,7 +1081,8 @@ async def openai_audio_speech(request: Request):
                 # 持たない話し方のみの LoRA でちょうど 30 秒の音が返っていた。
                 "seconds": None,
                 "duration_scale": OPENAI_DURATION_SCALE,
-                "max_ref_seconds": 30.0,
+                # 参照音声の上限は、モデルに入っている値に任せる（/api/v1/synthesize と同じ）。
+                "max_ref_seconds": None,
                 "max_text_len": None,
                 "num_steps": OPENAI_NUM_STEPS,
                 "seed": None,

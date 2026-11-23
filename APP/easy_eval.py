@@ -387,6 +387,15 @@ def release_eval_models() -> bool:
             break
         time.sleep(0.5)
 
+    # 選別に使う声の近さのモデル。読み込んでいなければ（モジュールごと未読込なら）何もしない。
+    char_sim = sys.modules.get("easy_char_sim")
+    ok_char = char_sim is None
+    for _ in range(60):
+        if ok_char or char_sim.release_if_idle():
+            ok_char = True
+            break
+        time.sleep(0.5)
+
     ok_whisper = False
     try:
         server_audio = sys.modules.get("server_audio")
@@ -405,7 +414,7 @@ def release_eval_models() -> bool:
 
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-    return ok_ecapa and ok_whisper
+    return ok_ecapa and ok_char and ok_whisper
 
 
 # === 素材の選別 ===
@@ -413,45 +422,112 @@ def release_eval_models() -> bool:
 # 生成した402本から、失敗作を落とすための基準。
 #
 # TTS は一定の割合で崩れる。声がぶれた本や読み間違えた本をそのまま学習
-# させると、LoRA がその崩れごと覚える。採用の判断に使っているのと同じ
-# 道具（ECAPA と anime-whisper）を、素材の選別にも使う。
+# させると、LoRA がその崩れごと覚える。書き起こしは採用の判断と同じ道具（anime-whisper）を使う。
+# 声の近さは、演技の声でも見分けられるモデルを使う（easy_char_sim。2026-10-10 に ECAPA から替えた）。
 
 # 読み間違いの上限。1本ずつの短い音声では書き起こしが揺れやすく、厳しくすると正常な本まで
 # 落ちるので、緩めにする。
 CLIP_CER_LIMIT = 0.25
 
-# 声のぶれの許容。全体の中央値からこれだけ下がったら外れとみなす。
-# 絶対値で切らないのは、声によって SIM の出方が違うから。
+# 声のぶれの許容。枠の中央値からこれだけ下がったら外れとみなす。
+# 絶対値で切らないのは、声によっても、演技の種類によっても、声の近さの出方が違うから。
 CLIP_SIM_MARGIN = 0.12
+
+# 足切りは枠（台本の見出し）ごとに決める。枠の平均は、音だけの枠で 0.29、怒りの枠で 0.75 まで開く
+# （実測。2026-10-10、勝ち気とおっとりの 590 本）。全体で 1 本の線を引くと、音だけの枠と喘ぎがほぼ全部落ちる。
+# 本数がこれに満たない枠は中央値が安定しないので、同じ種類（言葉・喘ぎ・音）の少ない枠をまとめて中央値を取る。
+FRAME_MIN_CLIPS = 8
+_SOUND_FRAME_WORDS = ("舐める", "リップ", "息切れ", "飲み込む", "咳", "あくび", "嗅ぐ", "鼻歌", "吐息", "息をのむ")
 
 # 落としすぎると素材が足りなくなる。基準を通った本がこの割合に満たないときは、
 # 落ちた本を点数（combined_score）の高い順に足して、この割合まで戻す。全部は使わない。
 CLIP_KEEP_MIN = 0.70
 
-# 評価そのものが失敗した本の許容割合。ECAPA のモデルが無い、書き起こしが
+# 評価そのものが失敗した本の許容割合。声の近さのモデルが無い、書き起こしが
 # 落ちている、といった場合は全本が失敗値になり、選別が一度も動かないまま
 # 学習に進んでしまう。広範囲に失敗したら工程ごと止める。1本2本の揺らぎでは止めない。
 CLIP_FAIL_MAX = 0.20
+
+
+# 読み間違いを測らない枠。喘ぎとリップノイズは言葉として書き起こせないので、台本と比べると正常な本まで落ちる
+# （実測。2026-10-11、演技 LoRA の強さ 2.0 で作った喘ぎ 8 本が、8 本とも読み間違いで落ちた。声の近さでは 0 本）。
+# これらの枠は、声の近さだけで選別する。
+_NO_READING_CHECK_WORDS = ("喘ぎ", "リップ")
+
+
+def skips_reading_check(clip: dict) -> bool:
+    """この本で、読み間違いを測らないか。短い行（"short" の印）と、喘ぎ・リップノイズの枠。"""
+    return bool(clip.get("short")) or any(word in clip.get("frame", "") for word in _NO_READING_CHECK_WORDS)
+
+
+def clip_similarity(ref_wav: str, wav: str) -> float:
+    """素材の選別に使う声の近さ。"""
+    import easy_char_sim
+
+    return easy_char_sim.char_similarity(ref_wav, wav)
+
+
+def frame_kind(frame: str) -> str:
+    """枠の種類。声の近さの出方が大きく違う 3 つに分ける。"""
+    if "喘ぎ" in frame:
+        return "喘ぎ"
+    if any(word in frame for word in _SOUND_FRAME_WORDS):
+        return "音"
+    return "言葉"
+
+
+def _median(values: list[float]) -> float:
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2] if ordered else 0.0
+
+
+def sim_floors(rated: list[dict]) -> dict[str, float]:
+    """枠ごとの、声の近さの足切り。枠の印（frame）が無い本は、全体で 1 つの枠として扱う。"""
+    by_frame: dict[str, list[float]] = {}
+    for clip in rated:
+        by_frame.setdefault(clip.get("frame", ""), []).append(clip["sim"])
+    floors: dict[str, float] = {}
+    small: dict[str, list[str]] = {}
+    for frame, sims in by_frame.items():
+        if len(sims) >= FRAME_MIN_CLIPS:
+            floors[frame] = _median(sims) - CLIP_SIM_MARGIN
+        else:
+            small.setdefault(frame_kind(frame), []).append(frame)
+    for frames in small.values():
+        floor = _median([sim for frame in frames for sim in by_frame[frame]]) - CLIP_SIM_MARGIN
+        for frame in frames:
+            floors[frame] = floor
+    return floors
 
 
 def screen_clips(
     clips: list[dict],
     ref_wav: str,
     on_progress=None,
+    scored_out: list | None = None,
 ) -> tuple[list[dict], dict]:
     """生成した本を評価して、使えるものだけ返す。
 
     clips は {"path", "text", ...} の列。返すのは (残した本, 内訳)。
-    評価値は各本に sim / cer として書き足す。
+    評価値は各本に sim / cer として書き足す。すでに sim と cer を持っている本は測り直さない
+    （落ちた本だけ作り直して、もう一度選別するときのため）。scored_out を渡すと、評価値つきの全部の本を入れる。
+    "short" の印がある本（短い音声は書き起こしが幻聴を起こしやすい）と、喘ぎ・リップノイズの枠の本は、
+    読み間違いを測らない（skips_reading_check）。
     """
     scored: list[dict] = []
     failed = 0
     first_error = ""
     for i, clip in enumerate(clips):
         path = clip["path"]
+        if "sim" in clip and "cer" in clip and not clip.get("eval_failed"):
+            scored.append(dict(clip))
+            if on_progress:
+                on_progress(i + 1, len(clips))
+            continue
         try:
-            sim = speaker_similarity(ref_wav, path)
-            err = cer(clip.get("plain", clip["text"]), transcribe(path))   # 絵文字を外した文と比べる
+            sim = clip_similarity(ref_wav, path)
+            # 絵文字を外した文と比べる
+            err = 0.0 if skips_reading_check(clip) else cer(clip.get("plain", clip["text"]), transcribe(path))
             broke = False
         except Exception as exc:  # noqa: BLE001 - 1本の失敗で全体を止めない
             sim, err = 0.0, 1.0
@@ -463,6 +539,8 @@ def screen_clips(
         scored.append(dict(clip, sim=sim, cer=err, eval_failed=broke))
         if on_progress:
             on_progress(i + 1, len(clips))
+    if scored_out is not None:
+        scored_out.extend(scored)
 
     if scored and failed > len(scored) * CLIP_FAIL_MAX:
         raise RuntimeError(
@@ -471,18 +549,22 @@ def screen_clips(
         )
 
     rated = [c for c in scored if not c["eval_failed"]]
-    sims = sorted(c["sim"] for c in rated)
-    median = sims[len(sims) // 2] if sims else 0.0
-    sim_floor = median - CLIP_SIM_MARGIN
+    floors = sim_floors(rated)
+    median = _median([c["sim"] for c in rated])
 
-    kept = [c for c in rated if c["sim"] >= sim_floor and c["cer"] <= CLIP_CER_LIMIT]
+    def low_sim(c: dict) -> bool:
+        return c["sim"] < floors[c.get("frame", "")]
+
+    kept = [c for c in rated if not low_sim(c) and c["cer"] <= CLIP_CER_LIMIT]
 
     report = {
         "total": len(scored),
         "kept": len(kept),
         "sim_median": median,
-        "sim_floor": sim_floor,
-        "dropped_sim": sum(1 for c in rated if c["sim"] < sim_floor),
+        # 全体の中央値から引いた値。枠の印が無い素材では、これが実際の足切り。印があるときの足切りは floors
+        "sim_floor": median - CLIP_SIM_MARGIN,
+        "floors": floors,
+        "dropped_sim": sum(1 for c in rated if low_sim(c)),
         "dropped_cer": sum(1 for c in rated if c["cer"] > CLIP_CER_LIMIT),
         "failed": failed,
         "topped_up": 0,

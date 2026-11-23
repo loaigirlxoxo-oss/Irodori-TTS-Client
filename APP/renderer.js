@@ -378,6 +378,7 @@ const valSwayCoeff = document.getElementById('val-sway-coeff');
 
 // LoRA elements
 const loraSelect = document.getElementById('lora-select');
+const loraScale = document.getElementById('lora-scale');
 const condModeRadios = document.getElementsByName('cond-mode');
 const condModeLoraRadio = document.getElementById('cond-mode-lora');
 const manageLorasBtn = document.getElementById('manage-loras-btn');
@@ -1270,6 +1271,8 @@ async function runSynthesis({ text, loraName, modelType, caption, seed, loraHasV
   const isVoiceDesign = isVoiceDesignModel(modelType);
   if (loraName) {
     formData.append('lora_name', loraName);
+    // 強さは、生成タブで選んだ LoRA にだけ掛ける。試聴用の一時登録などは、いつも 1.0（学習したまま）で鳴らす。
+    if (loraName === loraSelect.value) formData.append('lora_scale', loraScale.value);
     // 話し方のみの LoRA は話者を持たないので、誰の声かを参照音声で渡す。
     // 一覧から隠している一時登録は loraRegistry に載らず meta を引けないので、
     // 呼び出し側が声質の有無を知っているならそちらを優先する。
@@ -2161,6 +2164,8 @@ function applyCondModeUI() {
   } else {
     loraSelect.classList.add('hidden');
   }
+  // 強さのつまみは、LoRA を選べるときだけ出す。
+  document.getElementById('lora-scale-row').classList.toggle('hidden', mode !== 'lora' || !loraSelect.value);
   updateLoraVoiceHint();
   updateDurationEstimate();
 }
@@ -2296,6 +2301,9 @@ async function importLora() {
 function setupLoraEventListeners() {
   for (const r of condModeRadios) r.addEventListener('change', applyCondModeUI);
   loraSelect.addEventListener('change', () => { updateLoraVoiceHint(); updateDurationEstimate(); });
+  loraScale.addEventListener('input', () => {
+    document.getElementById('lora-scale-val').textContent = Number(loraScale.value).toFixed(1);
+  });
   manageLorasBtn.addEventListener('click', () => loraModal.classList.remove('hidden'));
   loraModalClose.addEventListener('click', () => loraModal.classList.add('hidden'));
   loraModal.addEventListener('click', (e) => {
@@ -5656,6 +5664,7 @@ function easyLockInputs(locked) {
   const ids = [
     'easy-pick-file', 'easy-pick-folder', 'easy-tune-reset',
     'easy-lora-name', 'easy-caption', 'easy-sample-text', 'easy-vd-model', 'easy-gen-model', 'easy-train-base', 'easy-no-wm',
+    'easy-script', 'easy-acting',
   ];
   for (const [slider] of EASY_TUNE) ids.push(slider);
   for (const id of ids) {
@@ -5665,6 +5674,8 @@ function easyLockInputs(locked) {
   for (const r of document.querySelectorAll('input[name="easy-src"]')) {
     r.disabled = locked;
   }
+  // 止めていた欄を戻したあと、演技LoRAの欄は「使えるかどうか」で決め直す（使えないのに押せる状態にしない）。
+  if (!locked) easySyncActing();
 }
 
 async function easyRunAll() {
@@ -5765,6 +5776,10 @@ async function easyRunAll() {
         })
       : await easyPost('/easy/generate', {
           ref_wav: srcRef, model_type: easyEl('easy-gen-model').value, dataset, watermark: !noWatermark,
+          script: easyEl('easy-script').value,
+          acting_lora: easyActingLora(),
+          // 声を文で作ったときだけ、その文を声の説明文として渡す。手持ちの音声を選んだときは、声の説明文が無い。
+          voice_caption: easySource() === 'design' ? easyEl('easy-caption').value.trim() : '',
         });
     await easyWatch(gen.job_id, (s) => {
       if (s.state === 'tuning') {
@@ -5868,9 +5883,70 @@ async function easyRunAll() {
 
 // --- セリフ ---
 
+// いま使える演技 LoRA の名前。使わない・使えないときは空。
+// 演技 LoRA は、登録情報に kind: "acting" の印が付いた LoRA。素材を作るモデルに当てられるものだけを使う。
+function easyActingLora() {
+  const box = easyEl('easy-acting');
+  // disabled は見ない。工程の最中は欄を止めているので、見ると、チェックしてあっても使わないことになる。
+  // 使えないときは easySyncActing がチェックを外している。
+  if (!box || !box.checked) return '';
+  const hit = easyActingCandidates().find(l => isLoraCompatible(l.base, easyEl('easy-gen-model').value));
+  return hit ? hit.name : '';
+}
+
+function easyActingCandidates() {
+  return loraRegistry.filter(l => l.kind === 'acting');
+}
+
+// 「演技LoRAを使って素材を作る」を、押せるか・押せないかに合わせる。押せないときは理由を書く。
+function easySyncActing() {
+  const box = easyEl('easy-acting');
+  if (!box) return;
+  const note = easyEl('easy-acting-note');
+  const all = easyActingCandidates();
+  const sel = easyEl('easy-gen-model');
+  const usable = all.find(l => isLoraCompatible(l.base, sel.value));
+  const modelName = sel.options[sel.selectedIndex].textContent.replace(/（.*$/, '');
+  let reason = '';
+  if (easySource() === 'folder') reason = 'フォルダの音声をそのまま使うときは、素材を作らないので使いません。';
+  else if (all.length === 0) reason = '演技LoRAが入っていないので使えません。';
+  else if (!usable) {
+    const bases = [...new Set(all.map(l => (LORA_BASES[l.base] || {}).tip || l.base))].join('・');
+    reason = `入っている演技LoRAは ${bases} 用で、${modelName} の素材づくりには使えません。素材を作るモデルを合わせると使えます。`;
+  }
+  box.disabled = Boolean(reason) || easyEl('easy-script').disabled;   // 工程の最中は、型の欄と一緒に止まっている
+  if (reason) box.checked = false;
+  note.textContent = reason
+    || `「${usable.name}」を当てて、セリフを演技つきで読ませます。喘ぎの枠だけ、効きを強くします。`;
+}
+
+// サーバーに繋がる前にこのタブの初期化が走ると、セリフ集の読み込みが失敗する（起動直後）。
+// そのままだと型の一覧が空のままになるので、繋がるまで何度か読み直す。
+let easyLinesRetries = 0;
+const EASY_LINES_RETRY_MAX = 40;
+const EASY_LINES_RETRY_MS = 3000;
+
 async function easyLoadLines() {
   try {
-    const r = await easyGet('/easy/lines');
+    const script = easyEl('easy-script').value;
+    const r = await easyGet('/easy/lines' + (script ? `?script=${encodeURIComponent(script)}` : ''));
+    // 型の一覧は、最初の読み込みで埋める。
+    const sel = easyEl('easy-script');
+    if (sel.options.length === 1) {
+      for (const s of r.scripts || []) {
+        const opt = document.createElement('option');
+        opt.value = s.key;
+        opt.textContent = s.label;
+        opt.dataset.note = s.note;
+        sel.appendChild(opt);
+      }
+    }
+    easyEl('easy-script-note').textContent = script
+      ? `${sel.options[sel.selectedIndex].dataset.note || ''}（${r.count} 本）`
+      : '';
+    // 型ごとのセリフ集は同梱のものを読むだけで、手では直せない。「編集」で開くのは標準のセリフ集。
+    easyEl('easy-open-lines').disabled = !r.editable;
+    easyEl('easy-open-lines').title = r.editable ? '' : '型ごとのセリフ集は編集できません。編集できるのは「標準」だけです';
     const count = easyEl('easy-lines-count');
     if (count) count.textContent = `${r.count} 本`;
     easyEl('easy-lines-info').textContent =
@@ -5879,6 +5955,12 @@ async function easyLoadLines() {
     // 404 はこの口がまだ無いサーバーに繋いでいるとき。アプリを開いたまま
     // 更新すると起こるので、生の JSON ではなく何をすればよいかを出す。
     const raw = String(e.message || '');
+    if (raw.includes('Failed to fetch') && easyLinesRetries < EASY_LINES_RETRY_MAX) {
+      easyLinesRetries += 1;
+      easyEl('easy-lines-info').textContent = '読み込み中…';
+      setTimeout(easyLoadLines, EASY_LINES_RETRY_MS);
+      return;
+    }
     const msg = raw.includes('Not Found')
       ? 'このタブに対応していないサーバーです。アプリを開き直してください'
       : (() => {
@@ -5913,7 +5995,21 @@ function initEasyTab() {
   };
   easyEl('easy-no-wm').addEventListener('change', syncWmNote);
   syncWmNote();
+  easyEl('easy-tips-toggle').addEventListener('click', () => {
+    const open = easyEl('easy-tips').classList.toggle('hidden') === false;
+    easyEl('easy-tips-toggle').setAttribute('aria-expanded', String(open));
+  });
   easyEl('easy-reload-lines').addEventListener('click', easyLoadLines);
+  easyEl('easy-script').addEventListener('change', easyLoadLines);
+  easyEl('easy-gen-model').addEventListener('change', easySyncActing);
+  document.querySelectorAll('input[name="easy-src"]').forEach((r) => r.addEventListener('change', easySyncActing));
+  // LoRA の一覧は、このタブの初期化より後に届くことがある。届くたびに合わせ直す。
+  const afterLoras = window.onLorasLoaded;
+  window.onLorasLoaded = () => {
+    if (typeof afterLoras === 'function') afterLoras();
+    easySyncActing();
+  };
+  easySyncActing();
   easyEl('easy-open-lines').addEventListener('click', async () => {
     try {
       await window.api.openEasyLines();

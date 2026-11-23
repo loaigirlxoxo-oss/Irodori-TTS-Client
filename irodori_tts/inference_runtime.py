@@ -27,7 +27,7 @@ from .codec import (
 )
 from .config import ModelConfig, merge_dataclass_overrides
 from .duration import build_duration_features
-from .lora import checkpoint_state_uses_lora, is_lora_adapter_dir, load_lora_adapter
+from .lora import checkpoint_state_uses_lora, is_lora_adapter_dir, load_lora_adapter, set_lora_scale
 from .meanflow import sample_euler_meanflow
 from .model import TextToLatentRFDiT
 from .quantization import (
@@ -254,6 +254,9 @@ class SamplingRequest:
     # ぎりぎりで切れて聞こえる。生成した長さ（target_samples）は超えない。
     tail_margin_seconds: float = 0.3
     lora_adapter: str | None = None
+    # Strength of the LoRA for this request (1.0 = as trained). Applied per request and restored
+    # on the next one, so a cached adapter never keeps the strength of an earlier request.
+    lora_scale: float = 1.0
     # How the watermark is applied (see watermark.WatermarkSpec). The payload is
     # always embedded; these only change what happens to the voice around it.
     watermark_mode: str = "resample"
@@ -795,6 +798,7 @@ class InferenceRuntime:
         self,
         adapter_path: str | None,
         *,
+        lora_scale: float = 1.0,
         messages: list[str],
         stage_timings: list[tuple[str, float]],
         log_fn: Callable[[str], None],
@@ -804,6 +808,7 @@ class InferenceRuntime:
         try:
             return self._prepare_lora_for_request_inner(
                 adapter_path,
+                lora_scale=lora_scale,
                 messages=messages,
                 log_fn=log_fn,
             )
@@ -817,6 +822,7 @@ class InferenceRuntime:
         self,
         adapter_path: str | None,
         *,
+        lora_scale: float = 1.0,
         messages: list[str],
         log_fn: Callable[[str], None],
     ) -> Any:
@@ -856,6 +862,12 @@ class InferenceRuntime:
         )
         self._lora_adapter_names[resolved_path] = adapter_name
         self._lora_adapter_names.move_to_end(resolved_path)
+        # Always set, including 1.0: the adapter may be cached with the strength of an earlier request.
+        touched = set_lora_scale(self.model, adapter_name, lora_scale)
+        if float(lora_scale) != 1.0:
+            msg = f"info: LoRA strength x{float(lora_scale):g} on {touched} layers"
+            messages.append(msg)
+            log_fn(msg)
         self.model = _move_inference_module(
             self.model,
             device=self.model_device,
@@ -1257,6 +1269,7 @@ class InferenceRuntime:
             self._infer_lock,
             self._prepare_lora_for_request(
                 req.lora_adapter,
+                lora_scale=req.lora_scale,
                 messages=messages,
                 stage_timings=stage_timings,
                 log_fn=_log,

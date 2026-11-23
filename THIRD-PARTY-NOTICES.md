@@ -66,9 +66,16 @@ v4-Large は文章の読み取り部分が `google/t5gemma-2-1b-1b` 由来のた
 | `llm-jp/llm-jp-3-150m` | 日本語トークナイザ（v2 / v3 / VoiceDesign） | Apache-2.0 |
 | `litagin/anime-whisper` | 書き起こし（データセットタブ） | MIT |
 | `sony/silentcipher` | 生成音声への電子透かし | MIT |
-| `speechbrain/spkrec-ecapa-voxceleb` | 話者の似ている度（かんたん学習の選別） | Apache-2.0 |
+| `speechbrain/spkrec-ecapa-voxceleb` | 話者の似ている度（かんたん学習で、できた LoRA を選ぶとき） | Apache-2.0 |
+| `litagin/anime_speaker_embedding_ecapa_tdnn_groupnorm` | 声の近さ（かんたん学習の素材の選別） | 下の注記を参照 |
 
 トークナイザの2つは、トークナイザの定義ファイルだけを取得します（重みは取得しません）。
+
+`litagin/anime_speaker_embedding_ecapa_tdnn_groupnorm` は同梱していません。かんたん学習で素材を選別するときに、
+初めて使う時点で Hugging Face から取得します。モデルの作りと前処理は、作者 litagin 氏の
+[anime_speaker_embedding](https://github.com/litagin02/anime_speaker_embedding) に合わせています（`APP/easy_char_sim.py`）。
+許諾の表記は、配布元の中で食い違っています。リポジトリの `LICENSE` は MIT、`pyproject.toml` の分類は
+GPLv3 以降です（2026-10 時点）。どちらの条件でも扱えるよう、本アプリはこのモデルを同梱も再配布もしません。
 
 ### Python パッケージ
 
