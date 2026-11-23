@@ -15,6 +15,7 @@ Storage layout (under IRODORI_DATA_DIR, falls back to APP/ in dev):
 from __future__ import annotations
 
 import json
+import math
 import re
 import shutil
 import sys
@@ -289,11 +290,18 @@ def list_loras() -> JSONResponse:
     )
 
 
+# LoRA の種類の印（meta.json の kind）。空はふつうの LoRA。
+LORA_KINDS = ("", "acting")
+
+
 class ImportLoraRequest(BaseModel):
     name: str = Field(..., description="Display name; must be unique")
     base: str = Field(..., description="One of v4, v3, v2, voice_design")
     source_path: str = Field(..., description="Absolute path to a PEFT adapter dir")
     notes: str = Field("", description="Free text notes")
+    # "acting" = 演技 LoRA（声ではなく演技を足す LoRA）。かんたん学習が、素材づくりに当てる LoRA を
+    # この印で探す。空ならふつうの LoRA。
+    kind: str = Field("", description='"acting" for an acting LoRA, empty otherwise')
 
 
 @router.post("/api/v1/loras/import")
@@ -301,6 +309,8 @@ def import_lora(req: ImportLoraRequest) -> JSONResponse:
     name = _validate_name(req.name)
     if req.base not in ALLOWED_BASES:
         raise HTTPException(400, f"base must be one of {list(ALLOWED_BASES)}")
+    if req.kind not in LORA_KINDS:
+        raise HTTPException(400, f"kind must be one of {list(LORA_KINDS)}")
 
     src = Path(req.source_path).expanduser()
     try:
@@ -337,6 +347,8 @@ def import_lora(req: ImportLoraRequest) -> JSONResponse:
         "source": str(src),
         "notes": req.notes,
     }
+    if req.kind:
+        meta["kind"] = req.kind
     (dst / META_NAME).write_text(
         json.dumps(meta, indent=2, ensure_ascii=False),
         encoding="utf-8",
@@ -364,7 +376,7 @@ class MergeLoraRequest(BaseModel):
 @router.post("/api/v1/loras/merge")
 def merge_loras(req: MergeLoraRequest) -> JSONResponse:
     import torch
-    from safetensors.torch import load_file, save_file
+    from safetensors.torch import load_file
 
     name = _validate_name(req.name)
     if loras_dir() / name in [loras_dir() / s["name"] for s in req.sources]:
@@ -373,6 +385,8 @@ def merge_loras(req: MergeLoraRequest) -> JSONResponse:
         raise HTTPException(409, f"LoRA '{name}' already exists; delete first")
     if not (2 <= len(req.sources) <= 3):
         raise HTTPException(400, "sources must be 2 or 3")
+    if req.method not in ("linear", "slerp", "concat"):
+        raise HTTPException(400, f"Unknown method '{req.method}'")
     if req.method == "slerp" and len(req.sources) != 2:
         raise HTTPException(400, "slerp requires exactly 2 sources")
 
@@ -406,6 +420,10 @@ def merge_loras(req: MergeLoraRequest) -> JSONResponse:
     if len(set(bases)) > 1:
         raise HTTPException(400, f"All sources must share the same base model. Got: {set(bases)}")
 
+    if req.method == "concat":
+        merged, out_cfg = _merge_concat(src_data)
+        return _save_merged(req, name, bases[0], src_data, merged, out_cfg)
+
     # --- ソース間の整合を先に検証する ---
     # キー集合: 積集合で黙って落とすと、adapter_config が要求する全量重みの
     # 欠けたアダプタができて、ロード時 KeyError が再発する。
@@ -417,7 +435,8 @@ def merge_loras(req: MergeLoraRequest) -> JSONResponse:
             raise HTTPException(
                 400,
                 f"Source adapters have different tensor sets "
-                f"('{sd['name']}' vs '{ref['name']}', e.g. {diff[:3]})",
+                f"('{sd['name']}' vs '{ref['name']}', e.g. {diff[:3]}). "
+                f"Use method 'concat' for LoRAs with different rank or layers",
             )
         # 形状: 検証せず加算に入ると内部500として返ってしまう。
         for key in ref_keys:
@@ -438,7 +457,8 @@ def merge_loras(req: MergeLoraRequest) -> JSONResponse:
             raise HTTPException(
                 400,
                 f"LoRA scaling config differs between '{ref['name']}' and '{sd['name']}' "
-                f"({ref_scale} vs {scale}); merging would not honor the requested weights",
+                f"({ref_scale} vs {scale}); merging would not honor the requested weights. "
+                f"Use method 'concat' for LoRAs with different rank or layers",
             )
 
     common_keys = ref_keys
@@ -527,16 +547,106 @@ def merge_loras(req: MergeLoraRequest) -> JSONResponse:
                 merged[key] = A_new.to(src_data[0]["tensors"][key].dtype)
                 merged[b_key] = B_new.to(src_data[0]["tensors"][b_key].dtype)
 
-    # 保存
+    # adapter_config.json は最初のソースのものをそのまま使う（r/alpha は全ソース一致を検証済み）
+    return _save_merged(req, name, bases[0], src_data, merged, src_data[0]["cfg"])
+
+
+def _lora_scale(cfg: dict) -> float:
+    """PEFT's effective multiplier on B@A for one adapter."""
+    r, alpha = cfg["r"], cfg["lora_alpha"]
+    return alpha / math.sqrt(r) if cfg.get("use_rslora") else alpha / r
+
+
+def _merge_concat(src_data: list[dict]):
+    """Exact weighted sum of LoRA deltas, written as one LoRA whose rank is the sum of the sources'.
+
+    linear/slerp re-factor the summed delta by SVD at the first source's rank, so they need
+    every source to share rank, scaling and layers. Here each layer becomes
+        B = [w1*s1*B1 | w2*s2*B2 | ...],  A = [A1 ; A2 ; ...]   (s = PEFT scale of that source)
+    with r = alpha = sum(r_i), so B@A equals sum(w_i * s_i * B_i@A_i) without loss.
+    A source that lacks a layer contributes zero rows there (PEFT needs one r for all layers).
+    """
+    import torch
+
+    for sd in src_data:
+        cfg = sd["cfg"]
+        if "r" not in cfg or "lora_alpha" not in cfg:
+            raise HTTPException(400, f"LoRA '{sd['name']}' has no r / lora_alpha in adapter_config.json")
+        if cfg.get("rank_pattern") or cfg.get("alpha_pattern"):
+            raise HTTPException(400, f"LoRA '{sd['name']}' uses rank_pattern/alpha_pattern; not supported")
+
+    def lora_layers(tensors):
+        return {k[: -len("lora_A.weight")] for k in tensors if k.endswith("lora_A.weight")}
+
+    def full_keys(tensors):
+        return {k for k in tensors if not k.endswith(("lora_A.weight", "lora_B.weight"))}
+
+    # modules_to_save (duration_predictor) are whole weights, averaged by weight over the sources
+    # that carry them. A source may carry none: the bundled acting LoRAs (Aegis) ship without the
+    # duration predictor, because with it every output came out 10-20% shorter (2026-11-23).
+    # Sources that do carry them must carry the same set, or keys the config declares would lack data.
+    with_full = [sd for sd in src_data if full_keys(sd["tensors"])]
+    ref_full = full_keys(with_full[0]["tensors"]) if with_full else set()
+    for sd in with_full[1:]:
+        if full_keys(sd["tensors"]) != ref_full:
+            raise HTTPException(400, f"Whole-saved modules differ between '{with_full[0]['name']}' and '{sd['name']}'")
+    full_w = sum(sd["w"] for sd in with_full)
+
+    per_src_layers = [lora_layers(sd["tensors"]) for sd in src_data]
+    all_layers = set().union(*per_src_layers)
+    ranks = [sd["cfg"]["r"] for sd in src_data]
+    r_out = sum(ranks)
+
+    merged: dict[str, torch.Tensor] = {}
+    for layer in sorted(all_layers):
+        shape_src = next(sd for sd, ls in zip(src_data, per_src_layers) if layer in ls)
+        in_dim = shape_src["tensors"][layer + "lora_A.weight"].shape[1]
+        out_dim = shape_src["tensors"][layer + "lora_B.weight"].shape[0]
+        a_parts, b_parts = [], []
+        for sd, ls, r in zip(src_data, per_src_layers, ranks):
+            if layer in ls:
+                A = sd["tensors"][layer + "lora_A.weight"].double()
+                B = sd["tensors"][layer + "lora_B.weight"].double()
+                if A.shape != (r, in_dim) or B.shape != (out_dim, r):
+                    raise HTTPException(400, f"Tensor shape mismatch for '{layer}' in '{sd['name']}'")
+                a_parts.append(A)
+                b_parts.append(sd["w"] * _lora_scale(sd["cfg"]) * B)
+            else:
+                a_parts.append(torch.zeros(r, in_dim, dtype=torch.float64))
+                b_parts.append(torch.zeros(out_dim, r, dtype=torch.float64))
+        merged[layer + "lora_A.weight"] = torch.cat(a_parts, 0).float()
+        merged[layer + "lora_B.weight"] = torch.cat(b_parts, 1).float()
+
+    for key in ref_full:
+        first = with_full[0]["tensors"][key]
+        if not torch.is_floating_point(first):
+            merged[key] = max(with_full, key=lambda sd: sd["w"])["tensors"][key]
+            continue
+        acc = sum(sd["w"] * sd["tensors"][key].double() for sd in with_full) / full_w
+        merged[key] = acc.to(first.dtype)
+
+    # Config: take a source whose layers cover all of them (keeps its target_modules as is);
+    # otherwise list exactly the merged modules as an anchored regex.
+    covering = next((sd for sd, ls in zip(src_data, per_src_layers) if ls == all_layers), None)
+    out_cfg = dict((covering or src_data[0])["cfg"])
+    if covering is None:
+        names = sorted(l.removeprefix("base_model.model.").rstrip(".") for l in all_layers)
+        out_cfg["target_modules"] = "^(" + "|".join(re.escape(n) for n in names) + ")$"
+    out_cfg.update(r=r_out, lora_alpha=r_out, use_rslora=False, rank_pattern={}, alpha_pattern={})
+    # declare exactly the whole-saved modules the merge carries (none when no source had them)
+    out_cfg["modules_to_save"] = with_full[0]["cfg"].get("modules_to_save") if with_full else None
+    return merged, out_cfg
+
+
+def _save_merged(req, name: str, base: str, src_data: list[dict], merged: dict, cfg: dict) -> JSONResponse:
+    from safetensors.torch import save_file
+
     dst = loras_dir() / name
     adapter_dst = dst / ADAPTER_SUBDIR
     try:
         adapter_dst.mkdir(parents=True)
 
-        # adapter_config.json は最初のソースからコピーして name を更新
-        src_cfg_path = loras_dir() / src_data[0]["name"] / ADAPTER_SUBDIR / "adapter_config.json"
-        if src_cfg_path.exists():
-            cfg = json.loads(src_cfg_path.read_text(encoding="utf-8"))
+        if cfg:
             (adapter_dst / "adapter_config.json").write_text(
                 json.dumps(cfg, indent=2, ensure_ascii=False), encoding="utf-8"
             )
@@ -553,7 +663,7 @@ def merge_loras(req: MergeLoraRequest) -> JSONResponse:
         source_info = ", ".join(f"{s['name']}×{s['w']:.2f}" for s in src_data)
         meta = {
             "name": name,
-            "base": bases[0],
+            "base": base,
             "imported_at": datetime.now(timezone.utc).isoformat(),
             "source": f"merged({req.method}): {source_info}",
             "notes": req.notes or f"Merged via {req.method}: {source_info}",
@@ -569,7 +679,7 @@ def merge_loras(req: MergeLoraRequest) -> JSONResponse:
     # UI は「Nレイヤーをマージ」と表示する。全量重み31本を足した今、
     # len(merged)//2 はどの実数にも一致しないので、LoRA 対の数を数えて返す。
     lora_pairs = sum(1 for k in merged if k.endswith("lora_A.weight"))
-    return JSONResponse(content={"status": "ok", "name": name, "base": bases[0], "keys_merged": lora_pairs})
+    return JSONResponse(content={"status": "ok", "name": name, "base": base, "keys_merged": lora_pairs})
 
 
 def lora_base_of(name: Optional[str]) -> Optional[str]:
