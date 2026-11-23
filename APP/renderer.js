@@ -4590,8 +4590,12 @@ async function playChunk(index) {
     // 1 行の失敗で朗読全体を止めない。以前はここで return しており、
     // 「……」だけの行（末尾記号を落とすと空になり 400）や、通信の瞬断、
     // OOM のいずれでもその場で止まっていた。飛ばして次へ進む。
-    // 世代が変わっているとき（設定変更）は次の再生で作り直すので進めない。
-    if (gen !== nGeneration) return;
+    // 世代が変わっているとき（設定変更）は、合成した音を捨てている。同じ行を新しい設定（nSession）で
+    // 作り直す。ここで抜けるだけだと誰も再生を呼ばず、「合成中...」のまま止まる（1.2.5 で直した）。
+    if (gen !== nGeneration) {
+      if (nPlaying && index === nIndex) playChunk(index);
+      return;
+    }
     setStatus(`${index + 1} 行目を飛ばしました`);
     if (index + 1 < nChunks.length) {
       gapTimer = setTimeout(() => { if (nPlaying) playChunk(index + 1); }, 120);
@@ -4658,6 +4662,15 @@ async function play() {
         setStatus('自己参照の生成に失敗（LoRAのみで続行）');
       }
     }
+  }
+  // 自己参照を作っている間は nPlaying がまだ false なので、invalidateNarrateSession は設定を差し替えない。
+  // その間に変えた設定を、ここで取り込む（seed と refBlob は引き継ぐ。invalidateNarrateSession と同じ決まり）。
+  const latest = currentSettings();
+  if (nSession && settingsKey(latest) !== nSession.key) {
+    nSession = Object.assign({}, latest, {
+      key: settingsKey(latest), seed: nSession.seed, refBlob: nSession.refBlob,
+    });
+    nBuffer = {};
   }
   nPlaying = true;
   playChunk(nIndex);
