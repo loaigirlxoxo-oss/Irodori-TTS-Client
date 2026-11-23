@@ -297,13 +297,18 @@ def load_lora_adapter(
     )
 
 
-def set_lora_scale(model: torch.nn.Module, adapter_name: str, scale: float) -> int:
+def set_lora_scale(model: torch.nn.Module, adapter_name: str, scale: float, *, fresh: bool = False) -> int:
     """Multiply the LoRA delta of one adapter by `scale`. Returns how many layers were touched.
 
     PEFT adds `scaling[adapter] * B(A(x))` per layer, where scaling is alpha / r (or alpha / sqrt(r)
     with rsLoRA). The value the adapter was loaded with is remembered on first use, so calling this
     again always scales from the original, never from the last request. Call it with 1.0 to restore.
     Modules saved whole (modules_to_save, e.g. duration_predictor) have no scaling and stay as loaded.
+
+    fresh=True marks "this adapter was just loaded": the remembered original scaling is dropped and
+    taken again from what PEFT set. Adapter names come from the adapter's folder, so a LoRA rebuilt
+    in the same folder gets the same name; without dropping, the previous LoRA's scaling (e.g. r=16 /
+    alpha=32 -> 2.0) would be applied to the new one (r=80 / alpha=80 -> 1.0).
     """
     touched = 0
     for module in model.modules():
@@ -311,6 +316,8 @@ def set_lora_scale(model: torch.nn.Module, adapter_name: str, scale: float) -> i
         if not isinstance(scaling, dict) or adapter_name not in scaling:
             continue
         base = module.__dict__.setdefault("_irodori_base_scaling", {})
+        if fresh:
+            base.pop(adapter_name, None)
         base.setdefault(adapter_name, float(scaling[adapter_name]))
         scaling[adapter_name] = base[adapter_name] * float(scale)
         touched += 1

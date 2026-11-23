@@ -27,7 +27,14 @@ from .codec import (
 )
 from .config import ModelConfig, merge_dataclass_overrides
 from .duration import build_duration_features
-from .lora import checkpoint_state_uses_lora, is_lora_adapter_dir, load_lora_adapter, set_lora_scale
+from .lora import (
+    LORA_ADAPTER_CONFIG_NAME,
+    LORA_ADAPTER_STATE_NAMES,
+    checkpoint_state_uses_lora,
+    is_lora_adapter_dir,
+    load_lora_adapter,
+    set_lora_scale,
+)
 from .meanflow import sample_euler_meanflow
 from .model import TextToLatentRFDiT
 from .quantization import (
@@ -652,6 +659,12 @@ class InferenceRuntime:
         # 8 GB GPU after 10-15 switches. Keep only the most recent few and
         # delete_adapter() the rest.
         self._lora_adapter_names: "OrderedDict[str, str]" = OrderedDict()
+        # What each cached adapter's files looked like when loaded ((mtime ns, size) of the weights
+        # and the config). A LoRA deleted and rebuilt under the same name (merge, re-import,
+        # checkpoint registration) keeps its folder, so the folder alone cannot tell the cache
+        # that the contents changed. Checked here on every request rather than by notifying from
+        # each caller, because a caller that forgets to notify would silently serve the old sound.
+        self._lora_adapter_stamps: dict[str, tuple] = {}
 
     @classmethod
     def from_key(cls, key: RuntimeKey) -> InferenceRuntime:
@@ -790,6 +803,19 @@ class InferenceRuntime:
         return str(path.resolve())
 
     @staticmethod
+    def _adapter_files_stamp(path: str) -> tuple:
+        """(mtime ns, size) of the adapter's weights and config; changes when the LoRA is rebuilt."""
+        stamp = []
+        for name in (*LORA_ADAPTER_STATE_NAMES, LORA_ADAPTER_CONFIG_NAME):
+            try:
+                st = (Path(path) / name).stat()
+            except FileNotFoundError:
+                stamp.append((name, None))
+                continue
+            stamp.append((name, st.st_mtime_ns, st.st_size))
+        return tuple(stamp)
+
+    @staticmethod
     def _adapter_name_for_path(path: str) -> str:
         digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:16]
         return f"runtime_{digest}"
@@ -839,9 +865,25 @@ class InferenceRuntime:
         if self.key.compile_model:
             raise RuntimeError("Dynamic LoRA loading is not compatible with compile_model=True.")
 
+        stamp = self._adapter_files_stamp(resolved_path)
         adapter_name = self._lora_adapter_names.get(resolved_path)
+        stale_name = None
+        if adapter_name is not None and self._lora_adapter_stamps.get(resolved_path) != stamp:
+            # The files changed since this adapter was loaded: load the new contents and drop the old copy.
+            # The old one is deleted only after the new one is active: PEFT refuses to load an adapter with
+            # whole-saved modules (duration_predictor) while no adapter is active ("Please specify at least
+            # one adapter to set"), which is the state right after deleting the only loaded adapter.
+            stale_name = adapter_name
+            del self._lora_adapter_names[resolved_path]
+            self._lora_adapter_stamps.pop(resolved_path, None)
+            msg = f"info: LoRA adapter changed on disk; reloading: {resolved_path}"
+            messages.append(msg)
+            log_fn(msg)
+            adapter_name = None
+        fresh = adapter_name is None
         if adapter_name is None:
-            adapter_name = self._adapter_name_for_path(resolved_path)
+            # The name includes the files' stamp, so a rebuilt LoRA never shares a name with the old copy.
+            adapter_name = self._adapter_name_for_path(f"{resolved_path}|{stamp!r}")
             msg = f"info: loading LoRA adapter: {resolved_path}"
             messages.append(msg)
             log_fn(msg)
@@ -862,8 +904,16 @@ class InferenceRuntime:
         )
         self._lora_adapter_names[resolved_path] = adapter_name
         self._lora_adapter_names.move_to_end(resolved_path)
+        self._lora_adapter_stamps[resolved_path] = stamp
+        if stale_name is not None:
+            delete_adapter = getattr(self.model, "delete_adapter", None)
+            if callable(delete_adapter):
+                delete_adapter(stale_name)
+                if self.model_device.type == "cuda":
+                    torch.cuda.empty_cache()
         # Always set, including 1.0: the adapter may be cached with the strength of an earlier request.
-        touched = set_lora_scale(self.model, adapter_name, lora_scale)
+        # fresh: loaded just now, so forget any scaling remembered under the same name (see set_lora_scale).
+        touched = set_lora_scale(self.model, adapter_name, lora_scale, fresh=fresh)
         if float(lora_scale) != 1.0:
             msg = f"info: LoRA strength x{float(lora_scale):g} on {touched} layers"
             messages.append(msg)
@@ -898,6 +948,7 @@ class InferenceRuntime:
                 log_fn(f"warn: failed to evict LoRA adapter {old_path}: {exc}")
                 break
             del self._lora_adapter_names[old_path]
+            self._lora_adapter_stamps.pop(old_path, None)
             evicted = True
             log_fn(f"info: evicted LoRA adapter to cap VRAM: {old_path}")
         if evicted and self.model_device.type == "cuda":
