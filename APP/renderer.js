@@ -1738,10 +1738,14 @@ function addRunSeparator() {
   const hh = String(t.getHours()).padStart(2, '0');
   const mm = String(t.getMinutes()).padStart(2, '0');
   el.textContent = `${hh}:${mm}`;
-  resultContainer.appendChild(el);
+  // 新しい生成を一番上に積む（1.2.5）。区切りは今回の分の頭に置く。
+  resultContainer.prepend(el);
+  return el;
 }
 
-function addTake(no, srcText) {
+// after を渡すと、その要素のすぐ下に入れる（同じ回の行の順を保つ）。
+// 渡さないときは一番上に入れる（新しい回の最初の行）。
+function addTake(no, srcText, after = null) {
   const el = document.createElement('div');
   el.className = 'take';
   el.innerHTML =
@@ -1753,7 +1757,7 @@ function addTake(no, srcText) {
     `<span class="len">生成中</span>` +
     `<span class="seed"></span>` +
     `<span class="acts"></span>`;
-  resultContainer.appendChild(el);
+  if (after) after.after(el); else resultContainer.prepend(el);
   updateResultPlaceholder();
   return el;
 }
@@ -1938,11 +1942,12 @@ async function generateAudio() {
     // どこからが今回かを区切りで示す。
     // placeholder-text は hidden の付け外しで DOM に残り続けるので、
     // children.length で見ると初回にも区切りが入る。take の有無で見る。
-    if (resultContainer.querySelector('.take')) addRunSeparator();
+    // 今回の分は一番上に、区切り → 1 行目 → 2 行目… の順で入れる（新しい生成が上）。
+    let tail = resultContainer.querySelector('.take') ? addRunSeparator() : null;
 
     // 行ごとに順へ流す。API は 1 回 1 テキストなので、まとめては送れない。
     // 先に空の行を並べておき、出来た順に埋める（どこまで進んだかが見える）。
-    const takes = lines.map((l) => addTake(l.no, l.text));
+    const takes = lines.map((l) => (tail = addTake(l.no, l.text, tail)));
     // 積むと今回の分が画面外に出ることがあるので、先頭へ寄せる。
     if (takes[0]) takes[0].scrollIntoView({ block: 'nearest', behavior: 'smooth' });
 
@@ -1997,8 +2002,9 @@ async function generateAudio() {
 
       // 候補が複数のときは 1 本目をこの行に、残りは続けて並べる
       fillTake(take, blobUrls[0] || `${API_ORIGIN}${json.results[0]}`, usedSeed(json));
+      let below = take;   // 候補の 2 本目以降は、その行のすぐ下に続けて並べる
       for (let i = 1; i < json.results.length; i++) {
-        const extra = addTake(`${lines[li].no}-${i + 1}`, lines[li].text);
+        const extra = below = addTake(`${lines[li].no}-${i + 1}`, lines[li].text, below);
         fillTake(extra, blobUrls[i] || `${API_ORIGIN}${json.results[i]}`, usedSeed(json));
       }
     }
@@ -2303,6 +2309,8 @@ function setupLoraEventListeners() {
   loraSelect.addEventListener('change', () => { updateLoraVoiceHint(); updateDurationEstimate(); });
   loraScale.addEventListener('input', () => {
     document.getElementById('lora-scale-val').textContent = Number(loraScale.value).toFixed(1);
+    // 朗読も同じ強さで鳴らすので、変えたら次の行から作り直す
+    invalidateNarrateSession();
   });
   manageLorasBtn.addEventListener('click', () => loraModal.classList.remove('hidden'));
   loraModalClose.addEventListener('click', () => loraModal.classList.add('hidden'));
@@ -4440,11 +4448,13 @@ function currentSettings() {
     // 地の文へのナレーション注釈。付けると尺の予測も変わるので、
     // 切り替えたら作り直せるよう settingsKey にも入れる。
     narrEmoji: narrEmojiOn(),
+    // LoRA の強さ。生成タブのつまみと同じ値を朗読でも使う（以前は送っておらず、常に 1.0 で鳴っていた）。
+    loraScale: loraScale.value,
   };
 }
 // 設定が変わったか判定するキー（seed/refBlobは除外）
 function settingsKey(s) {
-  return [s.model, s.loraName, s.voicePath, s.steps, s.cfgText, s.cfgSpk, s.selfrefOn, s.seedText, s.durationScale, s.precision, s.device, s.narrEmoji].join('|');
+  return [s.model, s.loraName, s.loraScale, s.voicePath, s.steps, s.cfgText, s.cfgSpk, s.selfrefOn, s.seedText, s.durationScale, s.precision, s.device, s.narrEmoji].join('|');
 }
 
 // 合成の世代。設定を変えるたびに進める。
@@ -4476,6 +4486,9 @@ function invalidateNarrateSession() {
     });
   }
 }
+// 生成タブの欄（精度・装置・LoRA の強さ）は、この囲いの外にある。そこから作り直しを呼べるよう、外に出す。
+// 出していなかったため、精度・装置を変えたときに ReferenceError になり、強さを変えても作り直されなかった。
+window.invalidateNarrateSession = invalidateNarrateSession;
 
 // ── 合成（1本ずつ） ──
 async function synthesize(index, session) {
@@ -4514,7 +4527,10 @@ async function synthesize(index, session) {
     if (session.precision) fd.append('precision', session.precision);
     if (session.device) fd.append('device', session.device);
     fd.append('seed', session.seed);   // セッション固定seedで話者を一貫させる
-    if (session.loraName) fd.append('lora_name', session.loraName);
+    if (session.loraName) {
+      fd.append('lora_name', session.loraName);
+      fd.append('lora_scale', session.loraScale);
+    }
     // The voice comes from the sample when there is one. Otherwise the
     // self-reference (one take generated at the start) is passed as the
     // reference for every chunk, so reference + LoRA bind the speaker and it
@@ -4662,6 +4678,7 @@ async function buildSelfRef(session) {
   if (session.device) fd.append('device', session.device);
   fd.append('seed', session.seed);
   fd.append('lora_name', session.loraName);   // 参照は付けない（no_ref）= LoRA素の声
+  fd.append('lora_scale', session.loraScale);
   const res = await fetch(`${API_URL}/synthesize`, { method: 'POST', body: fd });
   if (!res.ok) throw new Error(await res.text());
   const json = await res.json();
@@ -5067,6 +5084,14 @@ bookmarkBtn.addEventListener('click', () => {
   const notesInput= $('loramix-notes');
   const runBtn    = $('loramix-run-btn');
   const statusEl  = $('loramix-status');
+  const totalRow  = $('loramix-total-row');
+  const totalIn   = $('loramix-total');
+  const totalVal  = $('loramix-total-val');
+  const totalInfo = $('loramix-total-info');
+  const TOTAL_INFO = '各 LoRA に掛かる倍率は「比率 × 合計の強さ」です。均等に混ぜるとき、LoRA の数と同じ値（2 つなら 2.0）にすると、どれも元の強さ（×1.0）で入ります。';
+  // 合計の強さは「そのまま足す」だけで使う。利用者が動かすまでは LoRA の数に合わせる
+  // （均等の配分なら、どの LoRA も元の強さ ×1.0 で入る値）。動かしたあとは追従させない。
+  let totalTouched = false;
 
   if (!slotsEl) return;
 
@@ -5092,7 +5117,27 @@ bookmarkBtn.addEventListener('click', () => {
 
   // 取り合いを 1 本の帯で見せる。数字を追わなくても、ひとつ動かすと
   // 他が押し出される様子が分かる。色は .mixbar i:nth-child が持つ。
+  // 「そのまま足す」のときだけ合計の強さを出し、いまの設定で各 LoRA に掛かる倍率を見せる。
+  // 比率と合計を別々に動かすと、結果の倍率が見えないまま作ることになるため。
+  function syncTotal() {
+    if (!totalRow) return;
+    const concat = methodSel.value === 'concat';
+    totalRow.classList.toggle('hidden', !concat);
+    if (!concat) return;
+    if (!totalTouched) totalIn.value = String(Math.min(3, Math.max(0.5, slots.length)));
+    const total = parseFloat(totalIn.value);
+    totalVal.textContent = total.toFixed(1);
+    const sum = slots.reduce((a, s) => a + s.weight, 0) || 1;
+    const each = slots
+      .map(s => `${s.loraName || '未選択'} ×${(Math.round(s.weight / sum * total * 100) / 100).toFixed(2)}`)
+      .join(' / ');
+    // 画面には出さず、「i」に重ねたときの説明に入れる（setupThemedTooltips は data-title を読む）
+    totalInfo.removeAttribute('title');
+    totalInfo.dataset.title = `${TOTAL_INFO}　いまの倍率は ${each} です。`;
+  }
+
   function renderMix() {
+    syncTotal();
     if (!barEl) return;
     barEl.innerHTML = '';
     keyEl.innerHTML = '';
@@ -5209,6 +5254,8 @@ bookmarkBtn.addEventListener('click', () => {
   }
 
   addBtn.addEventListener('click', addSlot);
+  methodSel.addEventListener('change', syncTotal);
+  if (totalIn) totalIn.addEventListener('input', () => { totalTouched = true; syncTotal(); });
 
   runBtn.addEventListener('click', async () => {
     const newName = nameInput.value.trim();
@@ -5228,6 +5275,8 @@ bookmarkBtn.addEventListener('click', () => {
           sources,
           method: methodSel.value,
           notes: notesInput.value.trim(),
+          // 合計の強さは「そのまま足す」のときだけ送る（Linear / SLERP に送るとサーバが断る）
+          ...(methodSel.value === 'concat' ? { total: parseFloat(totalIn.value) } : {}),
         }),
       });
       const json = await res.json();

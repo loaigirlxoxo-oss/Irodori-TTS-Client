@@ -371,6 +371,10 @@ class MergeLoraRequest(BaseModel):
     sources: list[dict] = Field(..., description="[{name, weight}, ...] 2〜3個")
     method: str = Field("linear", description="linear or slerp (2つのみ)")
     notes: str = Field("", description="Free text notes")
+    # 「そのまま足す」（concat）だけで使う、全体の強さ。各 LoRA に掛かる倍率 = 配分（合計 1 に割ったもの）× total。
+    # 1:1 で total=2.0 なら、どの LoRA も元の強さ（×1.0）で入る。total=1.0 は以前と同じ（声 ×0.5 ＋ 演技 ×0.5）。
+    # Linear / SLERP は声どうしの中間を作るものなので、合計 1 が正しく、total は受け付けない。
+    total: float = Field(1.0, description="concat only: overall strength; each LoRA gets share x total")
 
 
 @router.post("/api/v1/loras/merge")
@@ -389,6 +393,11 @@ def merge_loras(req: MergeLoraRequest) -> JSONResponse:
         raise HTTPException(400, f"Unknown method '{req.method}'")
     if req.method == "slerp" and len(req.sources) != 2:
         raise HTTPException(400, "slerp requires exactly 2 sources")
+    # 上限 3 は、生成の lora_scale の上限にそろえた暫定の値。崩れ始める強さを測って決めた数字ではない。
+    if not 0.0 < float(req.total) <= 3.0:
+        raise HTTPException(400, f"total は 0 より大きく 3 以下にしてください（受け取った値: {req.total}）")
+    if req.method != "concat" and float(req.total) != 1.0:
+        raise HTTPException(400, "total（合計の強さ）は「そのまま足す」（concat）のときだけ使えます")
 
     # ソース LoRA を読み込む
     src_data = []
@@ -407,14 +416,17 @@ def merge_loras(req: MergeLoraRequest) -> JSONResponse:
             raise HTTPException(400, f"LoRA '{src_name}' has no safetensors")
         meta = _load_meta(src_dir)
         bases.append(meta.get("base", "unknown"))
-        w = float(s.get("weight", 1)) / total_w  # 正規化
+        share = float(s.get("weight", 1)) / total_w  # 正規化（配分）
+        # concat だけ、配分に合計の強さを掛ける。丸ごと持つ重み（尺の予測）の平均は _merge_concat が
+        # 配分で割り直すので、total は掛からない。
+        w = share * float(req.total) if req.method == "concat" else share
         tensors = load_file(str(adapter_path))
         cfg_path = src_dir / ADAPTER_SUBDIR / "adapter_config.json"
         try:
             adapter_cfg = json.loads(cfg_path.read_text(encoding="utf-8")) if cfg_path.exists() else {}
         except (json.JSONDecodeError, OSError):
             adapter_cfg = {}
-        src_data.append({"name": src_name, "w": w, "tensors": tensors, "meta": meta,
+        src_data.append({"name": src_name, "w": w, "share": share, "tensors": tensors, "meta": meta,
                          "cfg": adapter_cfg})
 
     if len(set(bases)) > 1:
@@ -660,13 +672,15 @@ def _save_merged(req, name: str, base: str, src_data: list[dict], merged: dict, 
             str(adapter_dst / "adapter_model.safetensors"),
         )
 
-        source_info = ", ".join(f"{s['name']}×{s['w']:.2f}" for s in src_data)
+        source_info = ", ".join(f"{s['name']}×{s['share']:.2f}" for s in src_data)
+        # どの強さで作ったかを後から追えるように、concat は合計の強さも残す（例: merged(concat, total=2.0): A×0.50, B×0.50）
+        method_info = f"{req.method}, total={float(req.total):g}" if req.method == "concat" else req.method
         meta = {
             "name": name,
             "base": base,
             "imported_at": datetime.now(timezone.utc).isoformat(),
-            "source": f"merged({req.method}): {source_info}",
-            "notes": req.notes or f"Merged via {req.method}: {source_info}",
+            "source": f"merged({method_info}): {source_info}",
+            "notes": req.notes or f"Merged via {method_info}: {source_info}",
         }
         (dst / META_NAME).write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
     except Exception:

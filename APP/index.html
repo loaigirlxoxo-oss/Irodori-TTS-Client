@@ -1339,7 +1339,6 @@
       <section class="card lift span-12">
         <div class="card-hd">
           <span class="cap">混ぜる LoRA</span><span class="sp"></span>
-          <span class="meta" style="font-size:11px;">同じベースモデルどうしのみ</span>
         </div>
         <div class="mix">
           <!-- スロットは renderer.js が入れる -->
@@ -1368,6 +1367,13 @@
               <option value="slerp">SLERP（球面補間・2 つのときだけ）</option>
               <option value="concat">そのまま足す（ランクや層が違う LoRA 同士も可・劣化なし）</option>
             </select>
+          </div>
+          <div class="easy-knob hidden" id="loramix-total-row">
+            <label for="loramix-total">合計の強さ <span class="v" id="loramix-total-val">2.0</span>
+              <span class="mix-info" id="loramix-total-info" tabindex="0" aria-label="合計の強さの説明"
+                    title="各 LoRA に掛かる倍率は「比率 × 合計の強さ」です。均等に混ぜるとき、LoRA の数と同じ値（2 つなら 2.0）にすると、どれも元の強さ（×1.0）で入ります。">i</span></label>
+            <input type="range" id="loramix-total" min="0.5" max="3" step="0.1" value="2" />
+            <div class="easy-ends"><span>薄い</span><span>濃い</span></div>
           </div>
           <div class="param-group">
             <label for="loramix-name">新しい LoRA の名前</label>

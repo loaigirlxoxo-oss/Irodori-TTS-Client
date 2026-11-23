@@ -431,6 +431,11 @@ body.no-aside .corner-side-r { display:none; }
   opacity:0; pointer-events:none; transition:opacity .12s .25s;
 }
 .app-tip.show { opacity:1; }
+/* 説明を画面に出さず、「i」に重ねたときだけ出す（マージの合計の強さ）。説明は title（上の .app-tip）で出す。 */
+.mix-info { display:inline-flex; align-items:center; justify-content:center; width:14px; height:14px;
+  border:1px solid var(--gold-dim); border-radius:50%; font-size:9.5px; font-style:italic; line-height:1;
+  color:var(--muted); cursor:help; user-select:none; }
+.mix-info:hover, .mix-info:focus-visible { color:var(--text); border-color:var(--gold); outline:none; }
 
 /* ══ タグ ══ */
 .tags { border-top:1px solid var(--line); }

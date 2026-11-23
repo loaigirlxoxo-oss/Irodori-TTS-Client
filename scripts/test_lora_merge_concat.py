@@ -86,6 +86,34 @@ def main():
     assert (m[FULL].double() - (0.75 * full_a.double() + 0.25 * full_c.double())).abs().max() < 1e-6
     print("2. 両方が尺の予測を持つ: 重みどおりの平均 OK")
 
+    # 合計の強さ: 50:50・total=2.0 → どちらも元の強さ（×1.0）で入る。尺の予測は平均のまま（total は掛からない）
+    res = server_lora.merge_loras(server_lora.MergeLoraRequest(
+        name="mix_t2", sources=[{"name": "char_a", "weight": 1}, {"name": "acting", "weight": 1}], method="concat", total=2.0))
+    assert res.status_code == 200, res.body
+    m, _ = merged("mix_t2")
+    for lay in LAYERS:
+        want = delta(a, lay, 8 / 4) + (delta(b, lay, 16 / 8) if lay in LAYERS[:1] else 0)
+        assert (delta(m, lay) - want).abs().max() < 1e-4, lay
+    assert torch.equal(m[FULL], full_a)
+    meta = json.loads((TMP / "loras" / "mix_t2" / "meta.json").read_text(encoding="utf-8"))
+    assert meta["source"] == "merged(concat, total=2): char_a×0.50, acting×0.50", meta["source"]
+    # 67:33・total=1.5 → ×1.0 と ×0.5
+    res = server_lora.merge_loras(server_lora.MergeLoraRequest(
+        name="mix_t15", sources=[{"name": "char_a", "weight": 2}, {"name": "acting", "weight": 1}], method="concat", total=1.5))
+    m, _ = merged("mix_t15")
+    want = delta(a, LAYERS[0], 1.0 * 8 / 4) + delta(b, LAYERS[0], 0.5 * 16 / 8)
+    assert (delta(m, LAYERS[0]) - want).abs().max() < 1e-4
+    print("4. 合計の強さ（50:50×2.0 → 各×1.0、67:33×1.5 → ×1.0 と ×0.5）と登録情報: OK")
+    for bad in ({"method": "linear", "total": 2.0}, {"method": "concat", "total": 3.5}, {"method": "concat", "total": 0}):
+        try:
+            server_lora.merge_loras(server_lora.MergeLoraRequest(
+                name="mix_bad", sources=[{"name": "char_a", "weight": 1}, {"name": "char_c", "weight": 1}], **bad))
+        except HTTPException as e:
+            assert e.status_code == 400, (bad, e)
+        else:
+            raise AssertionError(f"must refuse {bad}")
+    print("5. concat 以外の total・範囲外の total を 400 で断る: OK")
+
     d = TMP / "loras" / "char_c" / "adapter"
     t = load_file(str(d / "adapter_model.safetensors"))
     t["base_model.model.duration_predictor.extra.weight"] = torch.randn(2, 2)
