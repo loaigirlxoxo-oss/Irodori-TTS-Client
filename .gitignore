@@ -8,6 +8,9 @@ __pycache__/
 # --- 生成物・個人資産（サイズが大きく、コードではない） ---
 # LoRA は 1体118MB あり GitHub の 100MB 制限を超える。Google ドライブで管理する。
 APP/loras/
+# インストーラに同梱する演技 LoRA（Aegis）。100MB を超えるのでリポジトリに入れず、
+# ビルドする PC に置く。モデルそのものは Releases に別ファイルでも置く。
+APP/bundled_loras/
 APP/datasets/
 APP/lora_jobs/
 APP/voices/

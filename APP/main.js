@@ -128,6 +128,47 @@ function ensureDataLayout() {
   if (!fs.existsSync(meta)) {
     fs.writeFileSync(meta, JSON.stringify({ voices: [] }, null, 2));
   }
+  installBundledLoras();
+}
+
+// インストーラに同梱した演技 LoRA（Aegis）を、data/loras に写す（1.2.5 から）。
+// 写すのは 1 つにつき 1 回だけ。写した名前を印のファイルに残し、利用者が消したものは
+// 次の起動で戻さない。同じ名前のフォルダがすでにあるときは、利用者のものとして触らない。
+// 開発中はリポジトリの APP/loras をそのまま使うので、何もしない。
+const BUNDLED_LORA_MARK = '.bundled_loras.json';
+function installBundledLoras() {
+  if (!app.isPackaged) return;
+  const src = path.join(process.resourcesPath, 'bundled_loras');
+  if (!fs.existsSync(src)) return;
+  const dst = path.join(getDataRoot(), 'loras');
+  const markPath = path.join(dst, BUNDLED_LORA_MARK);
+  let done = [];
+  try { done = JSON.parse(fs.readFileSync(markPath, 'utf-8')).installed || []; } catch (e) { done = []; }
+  for (const name of fs.readdirSync(src)) {
+    if (done.includes(name) || !fs.statSync(path.join(src, name)).isDirectory()) continue;
+    const target = path.join(dst, name);
+    let copying = false;
+    try {
+      if (fs.existsSync(target)) {
+        console.log(`[Electron] 同梱の LoRA ${name}: 同じ名前がすでにあるので写さない`);
+      } else {
+        fs.mkdirSync(dst, { recursive: true });
+        copying = true;
+        fs.cpSync(path.join(src, name), target, { recursive: true });
+        copying = false;
+        console.log(`[Electron] 同梱の LoRA ${name} を ${target} に写した`);
+      }
+      done.push(name);
+      fs.writeFileSync(markPath, JSON.stringify({ installed: done }, null, 2));
+    } catch (e) {
+      // 写しかけを残すと壊れた LoRA が一覧に出るので、自分が写しかけたものだけ消す。
+      // 印は付けないので、次の起動でやり直す。
+      console.error(`[Electron] 同梱の LoRA ${name} を写せなかった: ${e.message}`);
+      if (copying) {
+        try { fs.rmSync(target, { recursive: true, force: true }); } catch (_) { /* nothing more to do */ }
+      }
+    }
+  }
 }
 
 function startPythonServer(port) {
@@ -216,11 +257,39 @@ async function createSetupWindow() {
   const win = new BrowserWindow({
     width: 620, height: 430, resizable: false,
     backgroundColor: '#000000',
+    icon: ICON_PATH,
     webPreferences: { preload: path.join(__dirname, 'preload.js'), contextIsolation: true }
   });
+  setTaskbarDetails(win);
   win.removeMenu();
   await win.loadFile('setup.html');
   return win;
+}
+
+// 起動.bat から動かすと、ウィンドウの持ち主は electron.exe そのもの。Windows はタスクバーの項目を
+// 実行ファイルで束ねるので、何も指定しないと Electron の既定アイコンで出て、ピン留めすると
+// 「electron.exe を引数なしで起動する」ピンになる（アプリが開かず Electron の既定画面だけが出る）。
+// アプリの ID・アイコン・ピンから起動するときのコマンドを、ウィンドウに結びつけて直す。
+// インストーラー版（app.isPackaged）は実行ファイル自体がアプリなので、何もしない。
+// ID はインストーラー版（com.loaivoice.irodori-tts-client）と分け、ピンが混ざらないようにする。
+const TASKBAR_APP_ID = 'com.loaivoice.irodori-tts-client-dev';
+const ICON_PATH = path.join(__dirname, 'build', 'icon.ico');
+if (process.platform === 'win32' && !app.isPackaged) {
+  app.setAppUserModelId(TASKBAR_APP_ID);
+}
+
+function setTaskbarDetails(win) {
+  if (process.platform !== 'win32' || app.isPackaged) return;
+  const launcher = path.join(__dirname, '..', '起動.bat');
+  win.setAppDetails({
+    appId: TASKBAR_APP_ID,
+    appIconPath: ICON_PATH,
+    appIconIndex: 0,
+    // ピン留めした項目から開くと、このコマンドが動く。起動.bat を通すのは、モデルの置き場（HF_HOME）を
+    // 起動.bat が決めているため。electron.exe を直接呼ぶと、その設定が抜ける
+    relaunchCommand: `"${process.env.ComSpec || 'cmd.exe'}" /c "${launcher}"`,
+    relaunchDisplayName: 'Irodori-TTS（開発版）',
+  });
 }
 
 function createWindow() {
@@ -232,7 +301,7 @@ function createWindow() {
     title: "Irodori-TTS Desktop",
     // 指定しないと Electron の既定アイコンのままウィンドウとタスクバーに出る。
     // .ico は 16〜256 を束ねてあり、Windows が場面ごとに使い分ける。
-    icon: path.join(__dirname, 'build', 'icon.ico'),
+    icon: ICON_PATH,
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -243,6 +312,7 @@ function createWindow() {
     backgroundColor: '#0f172a'
   });
 
+  setTaskbarDetails(mainWindow);
   mainWindow.loadFile('index.html');
 
   // レンダラ側の例外は DevTools を開かないと見えず、UI が黙って半分死ぬ
@@ -261,7 +331,51 @@ function createWindow() {
   });
 }
 
+// 同じ場所のアプリを二重に開かせない。二つ目が開くと、バックエンドがもう一つ立って GPU を取り合う。
+// Electron の requestSingleInstanceLock はデータの保存先（userData）ごとの錠で、保存先は productName で決まる。
+// Irodori-TTS と Irodori-TTS-Client は productName が同じなので、それを使うと互いの起動まで止めてしまう。
+// そこでアプリの置き場所ごとに名前付きパイプを錠にする。持ち主のプロセスが終われば OS が片付ける。
+const INSTANCE_PIPE = '\\\\.\\pipe\\irodori-tts-'
+  + crypto.createHash('sha1').update(__dirname.toLowerCase()).digest('hex').slice(0, 12);
+let instanceServer = null; // 参照を持っておかないと錠が回収される
+
+function focusExistingWindow() {
+  const win = BrowserWindow.getAllWindows()[0];
+  if (!win) return;
+  if (win.isMinimized()) win.restore();
+  win.show();
+  // 前面に出す権利は起動した側にあり、こちらの focus() だけではタスクバーが光るだけで終わる。
+  // 一度だけ最前面にして、ほかの窓の上に出す
+  win.setAlwaysOnTop(true);
+  win.focus();
+  win.setAlwaysOnTop(false);
+}
+
+// 錠を取れたら true。先に開いている方がいれば、その窓を前に出してもらって false。
+function acquireInstanceLock() {
+  return new Promise((resolve) => {
+    const server = net.createServer((socket) => { focusExistingWindow(); socket.end(); });
+    server.once('error', (err) => {
+      if (err.code !== 'EADDRINUSE') {
+        // パイプ自体が作れないときに起動まで止めると、アプリが一切使えなくなる。錠なしで続ける
+        console.error('[Electron] instance lock unavailable:', err);
+        resolve(true);
+        return;
+      }
+      const client = net.connect(INSTANCE_PIPE, () => { client.end(); resolve(false); });
+      // 持ち主が終わりかけていてつながらない。次の起動を止める理由がないので続ける
+      client.once('error', () => resolve(true));
+    });
+    server.listen(INSTANCE_PIPE, () => { instanceServer = server; resolve(true); });
+  });
+}
+
 app.whenReady().then(async () => {
+  if (!(await acquireInstanceLock())) {
+    app.quit();
+    return;
+  }
+
   // 暗い前提であることを Electron 側にも伝える。
   // 既定では OS の設定に関わらず prefers-color-scheme が light を返し
   // （electron/electron#21427）、<select> のようにブラウザが自前で描く

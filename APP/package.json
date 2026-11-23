@@ -1,6 +1,6 @@
 {
   "name": "irodori-desktop",
-  "version": "1.2.4",
+  "version": "1.2.5",
   "description": "Irodori-TTS Desktop Application",
   "main": "main.js",
   "scripts": {
@@ -102,6 +102,10 @@
       {
         "from": "../LICENSE",
         "to": "backend/LICENSE"
+      },
+      {
+        "from": "bundled_loras",
+        "to": "bundled_loras"
       }
     ],
     "win": {
